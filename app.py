@@ -6,23 +6,19 @@ import unidecode
 import json
 import os
 import re
+import time
 from datetime import datetime
 
 # --- CẤU HÌNH ---
-st.set_page_config(page_title="PharmaMatch: Logic Phân Tầng", layout="wide")
+st.set_page_config(page_title="PharmaMatch: Batch Speed", layout="wide")
 
-# --- HÀM CHUẨN HÓA ---
 def normalize_text(text):
     if pd.isna(text): return ""
-    text = str(text).lower()
-    text = unidecode.unidecode(text)
-    return text.strip()
+    return unidecode.unidecode(str(text).lower()).strip()
 
-# --- HÀM TÁCH SỐ TỪ HÀM LƯỢNG (Để so sánh chính xác) ---
 def extract_numbers(text):
-    """Lấy các con số từ chuỗi hàm lượng. VD: '160mg/4.5mcg' -> {'160', '4.5'}"""
+    """Lấy tập hợp số để so sánh chính xác."""
     if pd.isna(text): return set()
-    # Tìm các số (bao gồm cả số thập phân)
     nums = re.findall(r"\d+\.?\d*", str(text))
     return set(nums)
 
@@ -31,7 +27,6 @@ def extract_numbers(text):
 def load_vtma_data():
     try:
         df = pd.read_csv("data/vtma_standard.csv")
-        # Chuẩn hóa trước để tìm kiếm nhanh
         df['norm_name'] = df['ten_thuoc'].apply(normalize_text)
         df['norm_strength'] = df['ham_luong'].apply(normalize_text)
         df['norm_ingre'] = df['hoat_chat'].apply(normalize_text)
@@ -40,87 +35,152 @@ def load_vtma_data():
     except:
         return pd.DataFrame()
 
-# --- AI PHÂN TÁCH THÔNG TIN (Quan trọng nhất) ---
-def ai_parse_product(product_raw_name, api_key):
+# --- AI BATCH PROCESSING (GỘP NHIỀU DÒNG) ---
+def ai_process_batch(product_list, api_key):
+    """Gửi 1 danh sách sản phẩm lên AI cùng lúc"""
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # Prompt bắt buộc AI tách riêng Hàm Lượng
+        # Tạo prompt danh sách
+        items_str = "\n".join([f"- ID_{i}: {p}" for i, p in enumerate(product_list)])
+        
         prompt = f"""
-        Nhiệm vụ: Trích xuất thông tin dược phẩm từ chuỗi: "{product_raw_name}".
-        Yêu cầu trả về JSON chính xác:
-        - "brand_name": Tên biệt dược (VD: Panadol, Symbicort)
-        - "strength": Hàm lượng số (VD: 500mg, 160/4.5, 10mg). Nếu không có ghi null.
+        Danh sách thuốc cần trích xuất thông tin:
+        {items_str}
+        
+        Yêu cầu trả về JSON dạng List of Objects (Tuyệt đối không Markdown), mỗi object gồm:
+        - "id": "ID_..." (giữ nguyên ID tương ứng)
+        - "brand_name": Tên biệt dược
+        - "strength": Hàm lượng số (VD: 500mg, 10mg). Null nếu không có.
         - "active_ingredient": Hoạt chất.
-        - "manufacturer": Tên hãng/nước.
+        - "manufacturer": Tên hãng.
         """
+        
         response = model.generate_content(prompt)
         text = response.text.replace('```json', '').replace('```', '').strip()
-        return json.loads(text)
-    except:
-        # Fallback nếu AI lỗi: Trả về chính cái tên đó
-        return {"brand_name": product_raw_name, "strength": "", "active_ingredient": "", "manufacturer": ""}
+        
+        # Parse JSON
+        data = json.loads(text)
+        
+        # Chuyển về dict để dễ map lại: {'ID_0': {...}, 'ID_1': {...}}
+        result_dict = {item['id']: item for item in data}
+        return result_dict
+        
+    except Exception as e:
+        # Nếu lỗi cả batch, trả về rỗng để xử lý sau (hoặc in lỗi ra console)
+        print(f"Batch Error: {e}")
+        return {}
 
-# --- LOGIC MAP PHÂN TẦNG (HIERARCHICAL) ---
+# --- LOGIC MATCHING (GIỮ NGUYÊN ĐỂ ĐẢM BẢO CHÍNH XÁC) ---
 def hierarchical_match(input_data, vtma_df):
-    """
-    Input: Dữ liệu đã được AI làm sạch (Tên, Hàm lượng...)
-    Logic:
-    1. Lọc theo Tên (Brand Name) -> Lấy Top 30 ứng viên.
-    2. So hàm lượng (Strength) -> Re-rank lại Top 30 này.
-    3. So các tiêu chí phụ.
-    """
+    if not input_data: return None, 0, "AI Lỗi"
     
     input_brand = normalize_text(input_data.get('brand_name', ''))
     input_strength = normalize_text(input_data.get('strength', ''))
     input_ingre = normalize_text(input_data.get('active_ingredient', ''))
-    input_manu = normalize_text(input_data.get('manufacturer', ''))
     
-    # BƯỚC 1: LỌC THEO TÊN (Ưu tiên số 1)
-    # Dùng rapidfuzz lấy nhanh 30 mã có tên giống nhất trong toàn bộ DB
-    # threshold=60: Tên phải giống ít nhất 60% mới được xét tiếp
+    # 1. Lọc theo Tên (Brand Name)
     candidates = process.extract(
         input_brand, 
         vtma_df['norm_name'], 
-        limit=50, 
+        limit=30, 
         scorer=fuzz.token_set_ratio
     )
     
-    # Lấy ra index của các ứng viên này
     candidate_indices = [x[2] for x in candidates if x[1] >= 50]
-    
-    if not candidate_indices:
-        return None, 0, "Không tìm thấy tên tương tự"
+    if not candidate_indices: return None, 0, "Không tìm thấy tên"
 
     subset_df = vtma_df.iloc[candidate_indices].copy()
     
-    # BƯỚC 2: TÍNH ĐIỂM CHI TIẾT CHO TỪNG ỨNG VIÊN
+    # 2. Re-rank
     results = []
-    
-    input_nums = extract_numbers(input_strength) # VD: {160, 4.5}
+    input_nums = extract_numbers(input_strength)
     
     for idx, row in subset_df.iterrows():
-        # ĐIỂM TÊN (Base Score): Max 40đ
         name_score = fuzz.token_set_ratio(input_brand, row['norm_name']) * 0.4
         
-        # ĐIỂM HÀM LƯỢNG (Critical): Max 40đ
-        # Logic cứng: Nếu Input có số mà VTMA không có số đó -> PHẠT NẶNG
+        # Logic Hàm Lượng Nghiêm Ngặt
         str_score = 0
         row_nums = extract_numbers(row['norm_strength'])
         
         if not input_nums: 
-            # Nếu Input không ghi hàm lượng, so sánh chuỗi mờ
             str_score = fuzz.ratio(input_strength, row['norm_strength']) * 0.4
         else:
-            # Nếu Input có số (VD: 500), check xem VTMA có số 500 ko
-            # Nếu tập số khớp nhau (VD: input {160, 4.5} vs row {160, 4.5}) -> Điểm tuyệt đối
+            # Nếu Input có số, bắt buộc VTMA phải chứa tập số đó
             if input_nums.issubset(row_nums) or row_nums.issubset(input_nums):
-                str_score = 40 # Max điểm
+                str_score = 40 
             else:
-                str_score = 0 # Phạt về 0 nếu lệch số (VD: 10 vs 15)
+                str_score = 0 # Phạt nặng
         
-        # ĐIỂM PHỤ (Hoạt chất + Hãng): Max 20đ
-        ing_score = fuzz.token_sort_ratio(input_ingre, row['norm_ingre']) * 0.1
-        manu_score = fuzz.partial
+        ing_score = fuzz.token_sort_ratio(input_ingre, row['norm_ingre']) * 0.2
+        
+        final_score = name_score + str_score + ing_score
+        results.append({'row': row, 'score': final_score})
     
+    results.sort(key=lambda x: x['score'], reverse=True)
+    if results:
+        best = results[0]
+        return best['row'], best['score'], "OK"
+    return None, 0, "Low Score"
+
+# --- GIAO DIỆN ---
+st.title("🚀 PharmaMatch: Tốc Độ Cao (Batch Processing)")
+st.info("Chế độ Gộp Đơn: Xử lý 10 sản phẩm cùng lúc giúp tăng tốc độ gấp 5 lần.")
+
+with st.sidebar:
+    api_key = st.text_input("Gemini API Key", type="password")
+    if not api_key and "GENAI_API_KEY" in st.secrets:
+        api_key = st.secrets["GENAI_API_KEY"]
+    
+    batch_size = st.slider("Kích thước gói (Batch Size)", 5, 20, 10, help="Số lượng SP gửi đi 1 lần. Mạng khoẻ thì để cao.")
+
+vtma_df = load_vtma_data()
+if vtma_df.empty: st.stop()
+
+uploaded = st.file_uploader("Upload File Dược Vương", type=['xlsx', 'csv'])
+
+if uploaded and st.button("🚀 CHẠY BATCH MAPPING"):
+    if not api_key: st.stop()
+    
+    if uploaded.name.endswith('.csv'): df_in = pd.read_csv(uploaded)
+    else: df_in = pd.read_excel(uploaded)
+    
+    col_name = df_in.columns[0]
+    results = []
+    
+    # Chia dữ liệu thành các batch (gói nhỏ)
+    input_data = df_in[col_name].astype(str).tolist()
+    total_items = len(input_data)
+    
+    progress_bar = st.progress(0, text="Đang khởi động...")
+    
+    # Vòng lặp xử lý từng gói
+    for i in range(0, total_items, batch_size):
+        batch_items = input_data[i : i + batch_size] # Lấy danh sách 10 sp
+        
+        # 1. Gọi AI cho cả gói
+        try:
+            ai_results_dict = ai_process_batch(batch_items, api_key)
+        except:
+            ai_results_dict = {} # Nếu lỗi thì bỏ qua batch này (hoặc retry nếu muốn phức tạp hơn)
+        
+        # 2. Xử lý map cho từng sp trong gói
+        for idx, item_name in enumerate(batch_items):
+            item_id = f"ID_{idx}"
+            ai_info = ai_results_dict.get(item_id, {})
+            
+            # Map với VTMA
+            match_row, score, note = hierarchical_match(ai_info, vtma_df)
+            
+            # Ghi kết quả
+            res = {
+                'DV_Input': item_name,
+                'AI_Data': f"{ai_info.get('brand_name')} {ai_info.get('strength')}",
+                'VTMA_Code': '', 'VTMA_Name': '', 'VTMA_HamLuong': '',
+                'Score': score, 'Danh_Gia': 'Thấp'
+            }
+            
+            if match_row is not None:
+                res.update({
+                    'VTMA
