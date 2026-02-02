@@ -4,16 +4,16 @@ import google.generativeai as genai
 from rapidfuzz import fuzz, process
 import unidecode
 import json
+import os
 import re
 import time
 from datetime import datetime
-import os
 
 # --- 1. CẤU HÌNH TRANG ---
-st.set_page_config(page_title="PharmaMatch: Debug Mode", layout="wide")
-st.title("💊 PharmaMatch: Hệ Thống Mapping (Có Debug)")
+st.set_page_config(page_title="PharmaMatch: Dữ Liệu Nạp Sẵn", layout="wide")
+st.title("💊 PharmaMatch: Hệ Thống Mapping Dược Vương")
 
-# --- 2. CÁC HÀM XỬ LÝ ---
+# --- 2. CÁC HÀM XỬ LÝ TEXT & SỐ ---
 def normalize_text(text):
     if pd.isna(text): return ""
     return unidecode.unidecode(str(text).lower()).strip()
@@ -30,13 +30,12 @@ def get_match_quality(score):
     if score > 0: return "Thấp"
     return "Không khớp"
 
-# --- 3. GỌI AI ---
+# --- 3. GỌI AI (BATCH 5 SẢN PHẨM) ---
 def ai_process_batch(product_list, api_key):
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
         items_str = "\n".join([f"- ID_{i}: {p}" for i, p in enumerate(product_list)])
-        
         prompt = f"""
         Phân tích danh sách thuốc sau:
         {items_str}
@@ -52,12 +51,10 @@ def ai_process_batch(product_list, api_key):
         text = response.text.replace('```json', '').replace('```', '').strip()
         data = json.loads(text)
         return {item['id']: item for item in data}
-    except Exception as e:
-        # Debug: In lỗi ra nếu AI hỏng
-        st.error(f"Lỗi gọi AI: {e}")
+    except:
         return {}
 
-# --- 4. TÍNH ĐIỂM ---
+# --- 4. LOGIC TÍNH ĐIỂM CHI TIẾT (5 TIÊU CHÍ) ---
 def compare_detailed(ai_data, row):
     # 1. TÊN (40%)
     ai_name = normalize_text(ai_data.get('brand_name', ''))
@@ -67,7 +64,7 @@ def compare_detailed(ai_data, row):
     ai_ingre = normalize_text(ai_data.get('active_ingredient', ''))
     score_ingre = fuzz.token_sort_ratio(ai_ingre, row['norm_ingre']) * 0.2
     
-    # 3. HÀM LƯỢNG (20%)
+    # 3. HÀM LƯỢNG (20%) - Logic Số học
     ai_str = normalize_text(ai_data.get('strength', ''))
     ai_nums = extract_numbers(ai_str)
     row_nums = extract_numbers(row['norm_strength'])
@@ -86,144 +83,121 @@ def compare_detailed(ai_data, row):
     score_form = fuzz.partial_ratio(ai_form, row['norm_form']) * 0.1
     
     total = score_name + score_ingre + weighted_str + score_manu + score_form
-    
-    return {
-        'total': round(total, 1),
-        'raw_scores': {'name': score_name/0.4, 'ingre': score_ingre/0.2, 'str': score_str, 'manu': score_manu/0.1, 'form': score_form/0.1}
-    }
+    return {'total': round(total, 1), 'raw_scores': {'name': score_name/0.4, 'ingre': score_ingre/0.2, 'str': score_str, 'manu': score_manu/0.1, 'form': score_form/0.1}}
 
 def find_matches(ai_data, vtma_df, min_score, top_n):
     ai_name = normalize_text(ai_data.get('brand_name', ''))
-    # Nếu AI không tìm ra tên -> Dùng luôn tên gốc từ Dược Vương để search
-    if not ai_name: 
-        return []
-
     candidates = process.extract(ai_name, vtma_df['norm_name'], limit=50, scorer=fuzz.token_set_ratio)
-    indices = [x[2] for x in candidates if x[1] >= 30] # Hạ ngưỡng tìm sơ bộ xuống 30
-    
+    indices = [x[2] for x in candidates if x[1] >= 40]
     if not indices: return []
     subset = vtma_df.iloc[indices].copy()
     results = []
-    
     for idx, row in subset.iterrows():
         res = compare_detailed(ai_data, row)
         if res['total'] >= min_score:
             results.append({'row': row, 'res': res})
-            
     results.sort(key=lambda x: x['res']['total'], reverse=True)
     return results[:top_n]
 
-# --- 5. GIAO DIỆN ---
+# --- 5. TỰ ĐỘNG NẠP DỮ LIỆU VTMA ---
+@st.cache_data
+def load_fixed_vtma():
+    # Đường dẫn file nạp sẵn trong thư mục data trên GitHub
+    file_path = "data/vtma_standard.csv"
+    if os.path.exists(file_path):
+        try:
+            df = pd.read_csv(file_path)
+            # Chuẩn hóa ngay khi load
+            df['norm_name'] = df['ten_thuoc'].apply(normalize_text)
+            df['norm_ingre'] = df['hoat_chat'].apply(normalize_text)
+            df['norm_strength'] = df['ham_luong'].apply(normalize_text)
+            df['norm_manu'] = df['ten_cong_ty'].apply(normalize_text)
+            df['norm_form'] = df['dang_bao_che'].apply(normalize_text)
+            return df
+        except: return None
+    return None
+
+# --- 6. GIAO DIỆN ---
 with st.sidebar:
-    st.header("Cấu hình")
+    st.header("Cài đặt")
     api_key = st.text_input("Gemini API Key", type="password")
     if not api_key and "GENAI_API_KEY" in st.secrets:
         api_key = st.secrets["GENAI_API_KEY"]
     
     st.divider()
-    st.info("File VTMA")
-    vtma_file = st.file_uploader("Upload VTMA", type=['csv'])
-    
-    st.divider()
-    # MẶC ĐỊNH HẠ THẤP NGƯỠNG ĐỂ TEST
-    threshold = st.slider("Độ chính xác tối thiểu (%)", 0, 100, 30, help="Hãy để thấp (30-40) để xem có ra kết quả không")
-    top_n = st.number_input("Top N", 1, 10, 3)
-    
-    st.divider()
-    # NÚT DEBUG QUAN TRỌNG
-    debug_mode = st.checkbox("🔍 Bật chế độ Soi Lỗi (Debug)", value=True)
+    threshold = st.slider("Độ chính xác tối thiểu (%)", 0, 100, 60)
+    top_n = st.number_input("Số mã VTMA tối đa", 1, 10, 1)
 
-# LOAD VTMA
-vtma_df = None
-if vtma_file:
-    try: vtma_df = pd.read_csv(vtma_file)
-    except: pass
-elif os.path.exists("data/vtma_standard.csv"):
-    vtma_df = pd.read_csv("data/vtma_standard.csv")
-    
+# Thực hiện nạp dữ liệu ngầm
+vtma_df = load_fixed_vtma()
+
 if vtma_df is not None:
-    # Chuẩn hóa
-    for col, src in [('norm_name','ten_thuoc'), ('norm_ingre','hoat_chat'), ('norm_strength','ham_luong'), ('norm_manu','ten_cong_ty'), ('norm_form','dang_bao_che')]:
-        if src in vtma_df.columns:
-            vtma_df[col] = vtma_df[src].apply(normalize_text)
-        else:
-            vtma_df[col] = "" # Tạo cột rỗng nếu thiếu
+    st.sidebar.success(f"✅ Đã nạp sẵn {len(vtma_df)} mã VTMA")
+else:
+    st.sidebar.error("❌ Không tìm thấy file dữ liệu nạp sẵn tại 'data/vtma_standard.csv'")
+    st.stop()
 
-st.subheader("Upload Dược Vương")
-dv_file = st.file_uploader("File Input", type=['xlsx', 'csv'])
+# Hiển thị khu vực Upload Dược Vương
+st.subheader("📂 Tải danh mục Dược Vương")
+dv_file = st.file_uploader("Kéo thả file cần map", type=['xlsx', 'csv'])
 
-if dv_file and st.button("🚀 CHẠY NGAY"):
-    if vtma_df is None or not api_key:
-        st.error("Thiếu Data VTMA hoặc API Key")
+if dv_file and st.button("🚀 CHẠY MAPPING"):
+    if not api_key:
+        st.error("Thiếu API Key!")
         st.stop()
         
     if dv_file.name.endswith('.csv'): df_in = pd.read_csv(dv_file)
     else: df_in = pd.read_excel(dv_file)
     
     col_name = df_in.columns[0]
-    
-    # DEBUG: Kiểm tra file input
-    if debug_mode:
-        st.warning(f"🔍 DEBUG: Đang đọc cột '{col_name}'. Dòng đầu tiên là: {df_in.iloc[0][col_name]}")
-    
     final_results = []
     input_list = df_in[col_name].astype(str).tolist()
-    # Test chạy thử 5 dòng đầu nếu đang debug
-    run_list = input_list[:5] if debug_mode else input_list 
+    total = len(input_list)
+    bar = st.progress(0, text="Đang xử lý...")
     
-    bar = st.progress(0)
     batch_size = 5
-    
-    for i in range(0, len(run_list), batch_size):
-        batch_items = run_list[i : i + batch_size]
-        try: ai_dict = ai_process_batch(batch_items, api_key)
-        except: ai_dict = {}
+    for i in range(0, total, batch_size):
+        batch_items = input_list[i : i + batch_size]
+        ai_dict = ai_process_batch(batch_items, api_key)
         
-        # DEBUG: Kiểm tra AI trả về gì
-        if debug_mode and i == 0:
-            st.code(f"🔍 DEBUG AI Trả lời: {json.dumps(ai_dict, ensure_ascii=False, indent=2)}")
-
         for idx, item in enumerate(batch_items):
             item_id = f"ID_{idx}"
             ai_info = ai_dict.get(item_id, {})
-            
             matches = find_matches(ai_info, vtma_df, threshold, top_n)
             
-            # DEBUG: Nếu không tìm thấy, in ra tại sao
-            if debug_mode and not matches:
-                st.write(f"❌ '{item}' -> Điểm thấp hơn {threshold} hoặc AI không tách được tên.")
-
             row_base = {
-                'DV_Input': item, 'VTMA_Code': '', 'Tong_Diem': 0,
-                'AI_Ten': ai_info.get('brand_name'), 'VTMA_Ten': '', 
-                'AI_HamLuong': ai_info.get('strength'), 'VTMA_HamLuong': ''
+                'DV_Input': item, 'VTMA_Code': '', 'Tong_Diem': 0, 'Rank': '-',
+                'AI_Ten': ai_info.get('brand_name'), 'VTMA_Ten': '', 'Khop_Ten': '',
+                'AI_HoatChat': ai_info.get('active_ingredient'), 'VTMA_HoatChat': '', 'Khop_HoatChat': '',
+                'AI_HamLuong': ai_info.get('strength'), 'VTMA_HamLuong': '', 'Khop_HamLuong': '',
+                'AI_NSX': ai_info.get('manufacturer'), 'VTMA_NSX': '', 'Khop_NSX': '',
+                'AI_DangBaoChe': ai_info.get('dosage_form'), 'VTMA_DangBaoChe': '', 'Khop_DangBaoChe': ''
             }
             
             if not matches:
-                r = row_base.copy()
-                r['VTMA_Code'] = "Không tìm thấy"
-                final_results.append(r)
+                r = row_base.copy(); r['VTMA_Code'] = "Không thấy"; final_results.append(r)
             else:
                 for rank, m in enumerate(matches, 1):
-                    r = row_base.copy()
-                    v_row = m['row']
-                    res = m['res']
-                    scores = res['raw_scores']
+                    r = row_base.copy(); v_row = m['row']; scores = m['res']['raw_scores']
                     r.update({
-                        'VTMA_Code': v_row['ma_thuoc'],
-                        'Tong_Diem': res['total'],
-                        'VTMA_Ten': v_row['ten_thuoc'],
-                        'VTMA_HamLuong': v_row['ham_luong'],
-                        'ChiTiet_Diem': f"Tên:{int(scores['name'])} HL:{int(scores['str'])}"
+                        'VTMA_Code': v_row['ma_thuoc'], 'Tong_Diem': m['res']['total'], 'Rank': f"Top {rank}",
+                        'VTMA_Ten': v_row['ten_thuoc'], 'Khop_Ten': get_match_quality(scores['name']),
+                        'VTMA_HoatChat': v_row['hoat_chat'], 'Khop_HoatChat': get_match_quality(scores['ingre']),
+                        'VTMA_HamLuong': v_row['ham_luong'], 'Khop_HamLuong': get_match_quality(scores['str']),
+                        'VTMA_NSX': v_row['ten_cong_ty'], 'Khop_NSX': get_match_quality(scores['manu']),
+                        'VTMA_DangBaoChe': v_row['dang_bao_che'], 'Khop_DangBaoChe': get_match_quality(scores['form']),
                     })
                     final_results.append(r)
-                    
-        bar.progress((i+batch_size)/len(run_list))
+        
+        bar.progress(min((i + batch_size) / total, 1.0))
         time.sleep(1)
-
+        
     res_df = pd.DataFrame(final_results)
+    st.success("Xong!")
     st.dataframe(res_df)
     
-    if debug_mode:
-        st.info("ℹ️ Đang chạy chế độ Debug (chỉ 5 dòng đầu). Hãy tắt Debug để chạy full.")
-        
+    os.makedirs('output', exist_ok=True)
+    fname = f"output/map_final_{datetime.now().strftime('%H%M')}.xlsx"
+    res_df.to_excel(fname, index=False)
+    with open(fname, "rb") as f:
+        st.download_button("📥 Tải báo cáo chi tiết", f, file_name="ket_qua.xlsx")
