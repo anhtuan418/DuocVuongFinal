@@ -15,51 +15,27 @@ import time
 st.set_page_config(page_title="PharmaMaster AI", layout="wide", page_icon="🧬")
 
 # =============================================================================
-# 2. CLASS GEMINI AI (FIXED & DEBUG MODE)
+# 2. CLASS GEMINI AI (DYNAMIC SELECTOR)
 # =============================================================================
 class GeminiAgent:
-    def __init__(self, api_key, model_pref='gemini-1.5-flash'):
+    def __init__(self, api_key, model_name):
         self.is_ready = False
         self.current_model = "None"
-        self.available_models = []
         
-        if api_key:
+        if api_key and model_name:
             try:
                 genai.configure(api_key=api_key)
-                
-                # Lấy danh sách model thực tế từ Google
-                self.available_models = [m.name.replace('models/', '') for m in genai.list_models()]
-                
-                # Ưu tiên model người dùng chọn
-                if model_pref in self.available_models:
-                    self.model = genai.GenerativeModel(model_pref)
-                    self.current_model = model_pref
-                # Nếu không có, thử ép dùng Flash (thường luôn có)
-                elif 'gemini-1.5-flash' in self.available_models:
-                    self.model = genai.GenerativeModel('gemini-1.5-flash')
-                    self.current_model = 'gemini-1.5-flash'
-                # Nếu vẫn không có, thử Pro mới nhất
-                elif 'gemini-1.5-pro' in self.available_models:
-                    self.model = genai.GenerativeModel('gemini-1.5-pro')
-                    self.current_model = 'gemini-1.5-pro'
-                # Cuối cùng mới thử 1.0 pro (nhưng tên là gemini-1.0-pro chứ không phải gemini-pro)
-                elif 'gemini-1.0-pro' in self.available_models:
-                    self.model = genai.GenerativeModel('gemini-1.0-pro')
-                    self.current_model = 'gemini-1.0-pro'
-                else:
-                    # Cố gắng khởi tạo dù không tìm thấy trong list (đôi khi list bị ẩn)
-                    self.model = genai.GenerativeModel(model_pref)
-                    self.current_model = model_pref + " (Forced)"
-
+                self.model = genai.GenerativeModel(model_name)
+                self.current_model = model_name
                 self.is_ready = True
             except Exception as e:
-                self.error_msg = str(e)
                 self.is_ready = False
+                self.error = str(e)
         else:
             self.is_ready = False
 
     def smart_match(self, input_drug, candidates_df):
-        if not self.is_ready: return "⚠️ Lỗi: Chưa nhập API Key hoặc Key sai"
+        if not self.is_ready: return "⚠️ Lỗi: Chưa chọn Model hoặc API Key sai"
 
         candidates_str = ""
         for idx, row in candidates_df.iterrows():
@@ -295,35 +271,40 @@ if 'db_vtma' not in st.session_state:
         if df_loaded is not None: st.session_state.db_vtma = df_loaded
         else: st.stop()
 
-# --- SIDEBAR: CẤU HÌNH API ---
+# --- SIDEBAR: CẤU HÌNH API ĐỘNG (FIX LỖI 404) ---
 with st.sidebar:
     st.header("🤖 Cấu hình Gemini AI")
     api_key = st.text_input("Nhập Google API Key", type="password")
     
-    model_option = st.radio(
-        "Chọn Phiên bản AI:",
-        ("Gemini 1.5 Flash (Khuyên dùng)", "Gemini 1.5 Pro"),
-        index=0
-    )
-    
-    selected_model_name = 'gemini-1.5-flash' if "Flash" in model_option else 'gemini-1.5-pro'
-    
+    valid_models = []
     if api_key:
-        st.session_state.gemini = GeminiAgent(api_key, selected_model_name)
-        
-        # --- HIỂN THỊ TRẠNG THÁI KẾT NỐI ---
-        if st.session_state.gemini.is_ready:
-            st.success(f"✅ Đã kết nối: {st.session_state.gemini.current_model}")
+        try:
+            genai.configure(api_key=api_key)
+            # Lấy danh sách model thực tế từ Google
+            all_models = genai.list_models()
+            for m in all_models:
+                # Chỉ lấy model nào hỗ trợ generateContent
+                if 'generateContent' in m.supported_generation_methods:
+                     valid_models.append(m.name.replace("models/", ""))
+        except:
+            st.error("API Key lỗi hoặc không kết nối được!")
+
+    if valid_models:
+        # Tự động chọn flash hoặc pro nếu có
+        default_ix = 0
+        if 'gemini-1.5-flash' in valid_models:
+            default_ix = valid_models.index('gemini-1.5-flash')
+        elif 'gemini-1.5-pro' in valid_models:
+            default_ix = valid_models.index('gemini-1.5-pro')
             
-            # NÚT DEBUG ĐỂ BẠN KIỂM TRA MODEL
-            with st.expander("🛠️ Debug: Xem Model khả dụng"):
-                if st.button("🆘 Kiểm tra danh sách Model"):
-                    st.write(st.session_state.gemini.available_models)
-        else:
-            st.error("❌ Kết nối thất bại.")
+        selected_model = st.selectbox("Chọn Model AI:", valid_models, index=default_ix)
+        
+        # Khởi tạo Agent với model CHÍNH XÁC
+        st.session_state.gemini = GeminiAgent(api_key, selected_model)
+        st.success(f"✅ Đã kết nối: {selected_model}")
     else:
-        st.warning("⚠️ Cần API Key để dùng AI")
-        st.session_state.gemini = GeminiAgent(None)
+        st.info("ℹ️ Nhập API Key để hiện danh sách Model.")
+        st.session_state.gemini = GeminiAgent(None, None)
 
     st.divider()
     st.header("⚙️ Cấu hình Map")
@@ -348,7 +329,6 @@ with tab1:
         st.write(f"Đã nhận {len(df_in)} dòng.")
         col_target = st.selectbox("Chọn cột Tên thuốc:", df_in.columns)
         
-        # --- NÚT 1: CHẠY MAP CƠ BẢN ---
         if st.button("🚀 BƯỚC 1: CHẠY MAPPING CƠ BẢN"):
             all_results = []
             bar = st.progress(0)
@@ -392,55 +372,4 @@ with tab1:
                         st.error("Thiếu API Key!")
                     else:
                         df_res = st.session_state.result_df
-                        target_rows = df_res[df_res['Rank'] == 1]
-                        my_bar = st.progress(0)
-                        count = 0
-                        for idx, row in target_rows.iterrows():
-                            if row['Diem_Tong'] < 90:
-                                candidates = get_candidates(row['Input_Goc'], st.session_state.db_vtma, limit=15)
-                                ai_response = st.session_state.gemini.smart_match(row['Input_Goc'], candidates)
-                                st.session_state.result_df.at[idx, 'AI_Suggestion'] = f"🤖 {ai_response}"
-                            count += 1
-                            my_bar.progress(count / len(target_rows))
-                        st.success("Đã rà soát xong!")
-                        st.session_state.result_df = st.session_state.result_df 
-
-            with col_ai_2:
-                st.write("**Option 2: Deep Search**")
-                if st.button("🔍 Kích hoạt Deep Search"):
-                    if not st.session_state.gemini.is_ready:
-                        st.error("Thiếu API Key!")
-                    else:
-                        df_res = st.session_state.result_df
-                        mask = (df_res['Diem_Tong'] < threshold_ai) | (df_res['Trang_Thai'] == 'Không tìm thấy')
-                        hard_cases = df_res[mask]
-                        if hard_cases.empty:
-                            st.info("Không có ca nào.")
-                        else:
-                            my_bar = st.progress(0)
-                            count = 0
-                            for idx, row in hard_cases.iterrows():
-                                candidates = get_candidates(row['Input_Goc'], st.session_state.db_vtma, limit=30)
-                                ai_response = st.session_state.gemini.smart_match(row['Input_Goc'], candidates)
-                                st.session_state.result_df.at[idx, 'AI_Suggestion'] = f"🔍 {ai_response}"
-                                count += 1
-                                my_bar.progress(count / len(hard_cases))
-                            st.success(f"Đã xử lý {len(hard_cases)} ca khó!")
-                            st.session_state.result_df = st.session_state.result_df 
-
-            st.dataframe(st.session_state.result_df)
-            df_final = st.session_state.result_df
-            excel_name = "ket_qua_map_AI.xlsx"
-            df_final.to_excel(excel_name, index=False)
-            with open(excel_name, "rb") as f:
-                st.download_button("📥 Tải Excel", f, excel_name)
-
-with tab2:
-    st.write("Phần Training AI (Giữ nguyên)...")
-
-
-with tab2:
-    st.write("Phần Training AI (Giữ nguyên)...")
-
-with tab2:
-    st.write("Phần Training AI (Giữ nguyên)...")
+                        target_rows = df_res[df_res['
