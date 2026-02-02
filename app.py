@@ -312,15 +312,31 @@ with tab1:
                 
                 if matches:
                     for rank, m in enumerate(matches, 1):
+                        # --- LOGIC MỚI: XÁC ĐỊNH TRẠNG THÁI ---
+                        current_score = m['Điểm Tổng']
+                        status = ""
+                        
+                        if current_score == 100:
+                            status = "Khớp 100%"
+                        elif rank == 1:
+                            status = "Khớp cao" # Dòng Rank 1 luôn là Khớp cao (nếu chưa đạt 100%)
+                        elif current_score >= 70:
+                            status = "Trung bình"
+                        elif current_score >= 50:
+                            status = "Thấp"
+                        else:
+                            status = "Rất thấp"
+                        # --------------------------------------
+
                         all_results.append({
                             'Input_Goc': inp,
                             'Rank': rank,
+                            'Trang_Thai': status, # <--- Cột mới thêm vào đây
                             'Ma_VTMA': m['Mã VTMA'],
                             'Ten_VTMA': m['Tên Thuốc (SKU)'],
                             'NSX_Chuan': m['NSX'],
                             'Ham_Luong_Chuan': m['Hàm Lượng'],
                             'Diem_Tong': m['Điểm Tổng'],
-                            # Tách thành 5 cột như yêu cầu
                             'Diem_Ten': m['Điểm Tên (40%)'],
                             'Diem_Hang': m['Điểm Hãng (20%)'],
                             'Diem_HoatChat': m['Điểm HoạtChất (20%)'],
@@ -329,32 +345,35 @@ with tab1:
                             'AI_Bonus': m['AI Bonus']
                         })
                 else:
-                    # Dòng trống nếu không tìm thấy
-                    empty_row = {
-                        'Input_Goc': inp, 'Rank': '-', 'Ma_VTMA': 'Không tìm thấy',
-                        'Ten_VTMA': '', 'NSX_Chuan': '', 'Ham_Luong_Chuan': '',
+                    all_results.append({
+                        'Input_Goc': inp, 'Rank': '-', 
+                        'Trang_Thai': 'Không tìm thấy', # <--- Cột mới cho trường hợp rỗng
+                        'Ma_VTMA': '', 'Ten_VTMA': '', 
+                        'NSX_Chuan': '', 'Ham_Luong_Chuan': '',
                         'Diem_Tong': 0, 'Diem_Ten':0, 'Diem_Hang':0, 'Diem_HoatChat':0,
                         'Diem_HamLuong':0, 'Diem_Dang':0, 'AI_Bonus':0
-                    }
-                    all_results.append(empty_row)
-                
+                    })
                 bar.progress((i+1)/len(df_in))
                 
             df_out = pd.DataFrame(all_results)
             st.success("✅ Hoàn tất!")
             
-            # Hiển thị
+            # Hiển thị DataFrame
             st.dataframe(df_out, use_container_width=True)
             
-            # Xuất Excel
+            # Tô màu trạng thái trong Excel để dễ nhìn
+            # (Logic: Khớp 100% -> Xanh đậm, Khớp cao -> Xanh nhạt, Thấp -> Đỏ)
             excel_name = "ket_qua_map_final.xlsx"
             df_out.to_excel(excel_name, index=False)
-            with open(excel_name, "rb") as f:
-                st.download_button("📥 Tải Excel (Chuẩn font)", f, excel_name)
-                
-            # Xuất CSV (FIX LỖI FONT Ở ĐÂY)
-            csv = df_out.to_csv(index=False, encoding='utf-8-sig') # Quan trọng: utf-8-sig
-            st.download_button("📥 Tải CSV (Chuẩn font)", csv, "ket_qua_map_final.csv", "text/csv")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                with open(excel_name, "rb") as f:
+                    st.download_button("📥 Tải Excel", f, excel_name)
+            with col2:
+                csv = df_out.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button("📥 Tải CSV", csv, "ket_qua_map_final.csv", "text/csv")
+           
 
 with tab2:
     st.write("Phần Training AI (Giữ nguyên)...")
