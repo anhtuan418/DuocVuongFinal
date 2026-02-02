@@ -367,9 +367,82 @@ with tab1:
             
             with col_ai_1:
                 st.write("**Option 1: AI Rà Soát**")
+                st.caption("AI kiểm tra các dòng Rank 1 nghi ngờ")
                 if st.button("🕵️ Kích hoạt AI Rà Soát"):
                     if not st.session_state.gemini.is_ready:
                         st.error("Thiếu API Key!")
                     else:
                         df_res = st.session_state.result_df
-                        target_rows = df_res[df_res['
+                        target_rows = df_res[df_res['Rank'] == 1]
+                        
+                        my_bar = st.progress(0)
+                        count = 0
+                        
+                        for idx, row in target_rows.iterrows():
+                            # Logic: Chỉ check nếu Điểm < 90 (Nghi ngờ)
+                            if row['Diem_Tong'] < 90:
+                                candidates = get_candidates(row['Input_Goc'], st.session_state.db_vtma, limit=15)
+                                ai_response = st.session_state.gemini.smart_match(row['Input_Goc'], candidates)
+                                st.session_state.result_df.at[idx, 'AI_Suggestion'] = f"🤖 {ai_response}"
+                            
+                            count += 1
+                            my_bar.progress(count / len(target_rows))
+                            
+                        st.success("Đã rà soát xong!")
+                        st.session_state.result_df = st.session_state.result_df 
+
+            with col_ai_2:
+                st.write("**Option 2: Deep Search**")
+                st.caption(f"Tìm kỹ các dòng 'Không tìm thấy' hoặc Điểm < {threshold_ai}")
+                if st.button("🔍 Kích hoạt Deep Search"):
+                    if not st.session_state.gemini.is_ready:
+                        st.error("Thiếu API Key!")
+                    else:
+                        df_res = st.session_state.result_df
+                        mask = (df_res['Diem_Tong'] < threshold_ai) | (df_res['Trang_Thai'] == 'Không tìm thấy')
+                        hard_cases = df_res[mask]
+                        
+                        if hard_cases.empty:
+                            st.info("Không có ca nào dưới ngưỡng này.")
+                        else:
+                            my_bar = st.progress(0)
+                            count = 0
+                            for idx, row in hard_cases.iterrows():
+                                candidates = get_candidates(row['Input_Goc'], st.session_state.db_vtma, limit=30)
+                                ai_response = st.session_state.gemini.smart_match(row['Input_Goc'], candidates)
+                                st.session_state.result_df.at[idx, 'AI_Suggestion'] = f"🔍 {ai_response}"
+                                
+                                count += 1
+                                my_bar.progress(count / len(hard_cases))
+                            st.success(f"Đã xử lý {len(hard_cases)} ca khó!")
+                            st.session_state.result_df = st.session_state.result_df 
+
+            st.dataframe(st.session_state.result_df)
+            
+            df_final = st.session_state.result_df
+            excel_name = "ket_qua_map_AI.xlsx"
+            df_final.to_excel(excel_name, index=False)
+            with open(excel_name, "rb") as f:
+                st.download_button("📥 Tải Excel (Kèm đề xuất AI)", f, excel_name)
+
+with tab2:
+    st.subheader("2. Huấn luyện AI (Supervised Learning)")
+    st.info("Upload file lịch sử đã map đúng để máy học cách nhận diện Nhà Sản Xuất từ tên viết tắt.")
+    
+    uploaded_hist = st.file_uploader("Chọn file lịch sử (.xlsx)", key="hist")
+    
+    if uploaded_hist:
+        df_hist = pd.read_excel(uploaded_hist)
+        st.dataframe(df_hist.head(3))
+        
+        c1, c2 = st.columns(2)
+        col_in = c1.selectbox("Cột Tên Gốc (Input)", df_hist.columns)
+        col_out = c2.selectbox("Cột Hãng Chuẩn (Target)", df_hist.columns)
+        
+        if st.button("🎓 BẮT ĐẦU DẠY MÁY"):
+            with st.spinner("Đang phân tích dữ liệu..."):
+                n_learned = st.session_state.brain.learn(df_hist, col_in, col_out)
+                st.session_state.brain.save_model()
+            
+            st.success(f"🎉 Đã học xong! Máy đã ghi nhớ {n_learned} quy luật nhận diện hãng mới.")
+            st.json(st.session_state.brain.brand_memory)
