@@ -106,7 +106,7 @@ def extract_numbers(text):
 
 @st.cache_data
 def load_master_data():
-    """Phiên bản Debug: Tự động dò dấu phân cách và in tên cột ra màn hình"""
+    """Phiên bản Fix lỗi BOM (\ufeff) và Mapping cột ma_thuoc"""
     file_path = "data/vtma_standard.csv"
     
     if not os.path.exists(file_path):
@@ -114,73 +114,66 @@ def load_master_data():
         return None
 
     try:
-        # 1. Đọc file thông minh: Tự động nhận diện dấu phẩy (,) hay Tab (\t)
-        # engine='python' giúp tự dò separator
-        df = pd.read_csv(file_path, sep=None, engine='python', encoding='utf-8')
+        # 1. Dùng 'utf-8-sig' để loại bỏ ký tự \ufeff (BOM) do Excel sinh ra
+        df = pd.read_csv(file_path, sep=None, engine='python', encoding='utf-8-sig')
     except:
         try:
-            # Nếu lỗi encoding, thử lại với latin1
+            # Fallback nếu file lưu chuẩn cũ
             df = pd.read_csv(file_path, sep=None, engine='python', encoding='latin1')
         except Exception as e:
-            st.error(f"❌ Không đọc được file. Lỗi: {e}")
+            st.error(f"❌ Lỗi đọc file: {e}")
             return None
 
-    # 2. Chuẩn hóa tên cột: Xóa khoảng trắng thừa, về chữ thường
-    # Ví dụ: " VTMA Code " -> "vtma code"
-    df.columns = df.columns.str.strip().str.lower()
+    # 2. Vệ sinh tên cột (Xóa khoảng trắng, chữ thường, xóa BOM nếu sót)
+    df.columns = df.columns.str.strip().str.lower().str.replace('\ufeff', '')
     
-    # -----------------------------------------------------------
-    # 🔍 DEBUG: IN RA TÊN CỘT THỰC TẾ ĐỂ BẠN KIỂM TRA
-    # -----------------------------------------------------------
-    # Nếu code chạy ok thì dòng này sẽ ẩn đi, nếu lỗi nó giúp bạn biết file có gì
-    # st.write("🔍 Debug - Các cột tìm thấy trong file:", df.columns.tolist())
-    
-    # 3. MAPPING LINH HOẠT HƠN
-    # Tạo danh sách các tên cột thường gặp để map về chuẩn
+    # 3. MAPPING CHÍNH XÁC THEO FILE CỦA BẠN
+    # Bên trái: Tên biến Code cần
+    # Bên phải: Các tên cột có thể xuất hiện trong File của bạn
     mapping_dict = {
-        'ma_vtma': ['vtma code', 'ma thuoc', 'ma_vtma', 'vtma_code', 'code'],
-        'ten_thuoc': ['product', 'ten thuoc', 'ten_thuoc', 'name', 'ten'],
-        'hoat_chat': ['molecule', 'hoat chat', 'hoat_chat', 'active ingredient'],
-        'ten_cong_ty': ['manufacturer', 'corporation', 'ten cong ty', 'nha san xuat', 'hang sx'],
-        'ham_luong': ['galenic', 'ham luong', 'nong do', 'strength'],
-        'dang_bao_che': ['unit_measure', 'dang bao che', 'dosage form', 'form'],
-        'sku_full': ['sku', 'sku name', 'ten day du']
+        'ma_vtma': ['ma_thuoc', 'vtma code', 'ma_vtma', 'code'], # Đã thêm 'ma_thuoc'
+        'ten_thuoc': ['ten_thuoc', 'product', 'name'],
+        'hoat_chat': ['hoat_chat', 'molecule'],
+        'ten_cong_ty': ['ten_cong_ty', 'manufacturer', 'nha san xuat'],
+        'ham_luong': ['ham_luong', 'galenic', 'nong do'],
+        'dang_bao_che': ['dang_bao_che', 'unit_measure', 'form'],
+        'sku_full': ['ten_day_du', 'sku', 'sku name'] # Map 'ten_day_du' vào đây
     }
 
-    # Thực hiện đổi tên dựa trên từ điển trên
     final_rename_map = {}
     current_cols = df.columns.tolist()
     
     for standard_col, aliases in mapping_dict.items():
-        found = False
         for alias in aliases:
             if alias in current_cols:
                 final_rename_map[alias] = standard_col
-                found = True
-                break # Đã tìm thấy thì dừng, sang cột tiếp theo
+                break 
     
     if final_rename_map:
         df.rename(columns=final_rename_map, inplace=True)
 
-    # 4. KIỂM TRA LẠI SAU KHI MAP
+    # 4. Kiểm tra lại lần cuối
     required_cols = ['ma_vtma', 'ten_thuoc', 'ten_cong_ty', 'hoat_chat', 'ham_luong', 'dang_bao_che']
     missing = [c for c in required_cols if c not in df.columns]
     
     if missing:
-        st.error("⚠️ LỖI CẤU TRÚC FILE CSV")
-        st.error(f"Phần mềm cần cột: **{required_cols}**")
-        st.warning(f"Nhưng trong file của bạn sau khi đọc chỉ có: {df.columns.tolist()}")
-        st.info("💡 Gợi ý: Hãy mở file CSV bằng Excel, sửa dòng đầu tiên (Header) thành: vtma code, product, manufacturer, molecule, galenic, unit_measure")
+        st.error("⚠️ LỖI CẤU TRÚC FILE")
+        st.error(f"Code cần các cột: {required_cols}")
+        st.write("File đang có:", df.columns.tolist())
         st.stop()
 
-    # 5. Xử lý dữ liệu text (Logic cũ)
+    # 5. Xử lý dữ liệu (Như cũ)
+    # Chuyển đổi tất cả sang chuỗi để tránh lỗi
+    for col in required_cols:
+        df[col] = df[col].astype(str).replace('nan', '')
+
     df['norm_name'] = df['ten_thuoc'].apply(normalize_text)
     df['norm_brand'] = df['ten_cong_ty'].apply(normalize_text)
     df['norm_active'] = df['hoat_chat'].apply(normalize_text)
     df['norm_form'] = df['dang_bao_che'].apply(normalize_text)
     df['norm_strength'] = df['ham_luong'].apply(normalize_text)
 
-    # Cột hiển thị
+    # Hiển thị tên đầy đủ nếu có
     if 'sku_full' in df.columns:
         df['display_name'] = df['sku_full']
     else:
