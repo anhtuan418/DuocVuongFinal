@@ -281,8 +281,6 @@ if 'db_vtma' not in st.session_state:
 
 # --- SIDEBAR: CẤU HÌNH API ---
 with st.sidebar:
-    # --- SIDEBAR ---
-with st.sidebar:
     st.header("🤖 Cấu hình Gemini AI")
     api_key = st.text_input("Nhập Google API Key", type="password")
     
