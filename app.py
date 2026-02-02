@@ -15,53 +15,53 @@ import time
 st.set_page_config(page_title="PharmaMaster AI: Gemini Powered", layout="wide", page_icon="🧬")
 
 # =============================================================================
-# 2. CLASS GEMINI AI (BỘ NÃO DƯỢC SĨ)
+# 2. CLASS GEMINI AI (LINH HOẠT FLASH/PRO)
 # =============================================================================
 class GeminiAgent:
-    def __init__(self, api_key):
+    def __init__(self, api_key, model_name='gemini-1.5-flash'):
         if api_key:
             genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel('gemini-pro')
+            self.model = genai.GenerativeModel(model_name)
             self.is_ready = True
+            self.current_model = model_name
         else:
             self.is_ready = False
+            self.current_model = "None"
 
     def smart_match(self, input_drug, candidates_df):
-        """
-        Gửi Input và Danh sách ứng viên cho Gemini để nó chọn.
-        """
-        if not self.is_ready: return None
+        if not self.is_ready: return "⚠️ Lỗi: Chưa nhập API Key"
 
-        # Chuyển ứng viên thành chuỗi văn bản để Gemini đọc
-        # Chỉ lấy các cột cần thiết để tiết kiệm Token
+        # Chuyển ứng viên thành chuỗi văn bản
         candidates_str = ""
         for idx, row in candidates_df.iterrows():
-            candidates_str += f"- ID: {row['ma_vtma']} | Tên: {row['ten_thuoc']} | Hàm lượng: {row['ham_luong']} | NSX: {row['ten_cong_ty']}\n"
+            candidates_str += f"- ID: {row['ma_vtma']} | Tên: {row['ten_thuoc']} | HL: {row['ham_luong']} | NSX: {row['ten_cong_ty']}\n"
 
+        # Prompt được tinh chỉnh cho từng model nếu cần
         prompt = f"""
-        Bạn là Chuyên gia Dữ liệu Dược phẩm. Hãy giúp tôi khớp tên thuốc.
+        Bạn là Dược sĩ cấp cao. Tìm mã thuốc chuẩn (ID) cho sản phẩm đầu vào.
         
-        INPUT CỦA TÔI: "{input_drug}"
+        INPUT: "{input_drug}"
         
-        DANH SÁCH MÃ CHUẨN TRONG DATABASE (CANDIDATES):
+        DATABASE (Ứng viên):
         {candidates_str}
         
         YÊU CẦU:
-        1. Hãy phân tích Input (Tên, Hoạt chất, Hàm lượng, Dạng bào chế, Hãng).
-        2. So sánh với danh sách Candidates.
-        3. Chọn ra 1 mã ID khớp nhất (Match chính xác hoặc tương đương sinh học).
-        4. Nếu không có mã nào khớp > 80% về mặt dược học, hãy trả về "NONE".
+        1. So sánh Input với ứng viên (Hoạt chất, Hàm lượng, Hãng).
+        2. Chọn 1 ID khớp nhất. 
         
-        ĐỊNH DẠNG TRẢ VỀ (Chỉ trả về 1 dòng duy nhất):
-        ID_CHON | ĐỘ_TIN_CẬY (Cao/TB/Thap) | LÝ_DO_NGẮN_GỌN
-        Ví dụ: VTMA_001 | Cao | Khớp hoàn toàn tên và hàm lượng
+        TRẢ LỜI 1 DÒNG:
+        ID_CHON | ĐỘ_TIN_CẬY (Cao/Vừa/Thấp) | LÝ DO NGẮN
+        Ví dụ: VTMA_001 | Cao | Khớp hoàn toàn tên và hãng
+        Nếu không khớp >70%, trả về: "NONE | - | Không tìm thấy"
         """
         
         try:
             response = self.model.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
-            return f"ERROR: {str(e)}"
+            return f"AI Error: {str(e)}"
+        
+       
 
 # =============================================================================
 # 3. CLASS MACHINE LEARNING CŨ (PHARMA BRAIN)
@@ -281,14 +281,32 @@ if 'db_vtma' not in st.session_state:
 
 # --- SIDEBAR: CẤU HÌNH API ---
 with st.sidebar:
+    # --- SIDEBAR ---
+with st.sidebar:
     st.header("🤖 Cấu hình Gemini AI")
-    api_key = st.text_input("Nhập Google API Key", type="password", help="Lấy tại: aistudio.google.com")
+    api_key = st.text_input("Nhập Google API Key", type="password")
+    
+    # --- THÊM NÚT CHỌN MODEL TẠI ĐÂY ---
+    model_option = st.radio(
+        "Chọn Phiên bản AI:",
+        ("Gemini 1.5 Flash (Nhanh)", "Gemini 1.5 Pro (Thông minh)"),
+        index=0,
+        help="Flash: Tốc độ cao, phù hợp chạy nhiều. Pro: Suy luận sâu, phù hợp ca khó."
+    )
+    
+    # Mapping lựa chọn của người dùng sang tên kỹ thuật
+    selected_model_name = 'gemini-1.5-flash' if "Flash" in model_option else 'gemini-1.5-pro'
     
     if api_key:
-        st.session_state.gemini = GeminiAgent(api_key)
-        st.success("Gemini đã sẵn sàng!")
+        # Khởi tạo Agent với model người dùng chọn
+        st.session_state.gemini = GeminiAgent(api_key, selected_model_name)
+        
+        if "Flash" in model_option:
+            st.success("✅ Đã kết nối: Gemini 1.5 Flash ⚡")
+        else:
+            st.success("✅ Đã kết nối: Gemini 1.5 Pro 🧠")
     else:
-        st.warning("Nhập API Key để dùng tính năng AI cao cấp.")
+        st.warning("⚠️ Cần API Key để dùng AI")
         st.session_state.gemini = GeminiAgent(None)
 
     st.divider()
@@ -296,9 +314,8 @@ with st.sidebar:
     min_score = st.slider("Min Score (%)", 0, 100, 60) 
     top_n = st.number_input("Top N", 1, 10, 3)
     
-    # Cấu hình cho tính năng 2
     st.subheader("⚙️ Cấu hình AI Rà Soát")
-    threshold_ai = st.number_input("Ngưỡng kích hoạt AI (xx)", 0, 100, 70, help="Dưới điểm này AI sẽ tự tìm lại")
+    threshold_ai = st.number_input("Ngưỡng kích hoạt AI (xx)", 0, 100, 70)
 
 st.title("🧬 PharmaMaster: AI-Powered Mapping")
 
