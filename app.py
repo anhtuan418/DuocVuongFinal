@@ -106,62 +106,87 @@ def extract_numbers(text):
 
 @st.cache_data
 def load_master_data():
-    """Đọc và chuẩn hóa file VTMA (Database Chuẩn)"""
+    """Phiên bản Debug: Tự động dò dấu phân cách và in tên cột ra màn hình"""
     file_path = "data/vtma_standard.csv"
     
     if not os.path.exists(file_path):
-        st.error(f"❌ Lỗi Critical: Không tìm thấy file '{file_path}'. Vui lòng kiểm tra thư mục 'data'.")
+        st.error(f"❌ Không tìm thấy file '{file_path}'")
         return None
 
-    # Thử đọc với các bảng mã khác nhau để tránh lỗi font
     try:
-        df = pd.read_csv(file_path, encoding='utf-8')
+        # 1. Đọc file thông minh: Tự động nhận diện dấu phẩy (,) hay Tab (\t)
+        # engine='python' giúp tự dò separator
+        df = pd.read_csv(file_path, sep=None, engine='python', encoding='utf-8')
     except:
         try:
-            df = pd.read_csv(file_path, encoding='latin1')
-        except:
-            st.error("❌ Lỗi Encoding: Không đọc được file CSV. Hãy lưu file dưới dạng 'UTF-8'.")
+            # Nếu lỗi encoding, thử lại với latin1
+            df = pd.read_csv(file_path, sep=None, engine='python', encoding='latin1')
+        except Exception as e:
+            st.error(f"❌ Không đọc được file. Lỗi: {e}")
             return None
 
-    # Chuẩn hóa tên cột về chữ thường để map
+    # 2. Chuẩn hóa tên cột: Xóa khoảng trắng thừa, về chữ thường
+    # Ví dụ: " VTMA Code " -> "vtma code"
     df.columns = df.columns.str.strip().str.lower()
     
-    # MAPPING: Tên cột trong File CSV -> Tên biến trong Python
-    col_map = {
-        'vtma code': 'ma_vtma',
-        'product': 'ten_thuoc',
-        'molecule': 'hoat_chat',
-        'manufacturer': 'ten_cong_ty',
-        'galenic': 'ham_luong',
-        'unit_measure': 'dang_bao_che',
-        'sku': 'sku_full' # Giữ lại cột SKU để hiển thị
-    }
-    df.rename(columns=col_map, inplace=True)
+    # -----------------------------------------------------------
+    # 🔍 DEBUG: IN RA TÊN CỘT THỰC TẾ ĐỂ BẠN KIỂM TRA
+    # -----------------------------------------------------------
+    # Nếu code chạy ok thì dòng này sẽ ẩn đi, nếu lỗi nó giúp bạn biết file có gì
+    # st.write("🔍 Debug - Các cột tìm thấy trong file:", df.columns.tolist())
     
-    # Kiểm tra cột bắt buộc
+    # 3. MAPPING LINH HOẠT HƠN
+    # Tạo danh sách các tên cột thường gặp để map về chuẩn
+    mapping_dict = {
+        'ma_vtma': ['vtma code', 'ma thuoc', 'ma_vtma', 'vtma_code', 'code'],
+        'ten_thuoc': ['product', 'ten thuoc', 'ten_thuoc', 'name', 'ten'],
+        'hoat_chat': ['molecule', 'hoat chat', 'hoat_chat', 'active ingredient'],
+        'ten_cong_ty': ['manufacturer', 'corporation', 'ten cong ty', 'nha san xuat', 'hang sx'],
+        'ham_luong': ['galenic', 'ham luong', 'nong do', 'strength'],
+        'dang_bao_che': ['unit_measure', 'dang bao che', 'dosage form', 'form'],
+        'sku_full': ['sku', 'sku name', 'ten day du']
+    }
+
+    # Thực hiện đổi tên dựa trên từ điển trên
+    final_rename_map = {}
+    current_cols = df.columns.tolist()
+    
+    for standard_col, aliases in mapping_dict.items():
+        found = False
+        for alias in aliases:
+            if alias in current_cols:
+                final_rename_map[alias] = standard_col
+                found = True
+                break # Đã tìm thấy thì dừng, sang cột tiếp theo
+    
+    if final_rename_map:
+        df.rename(columns=final_rename_map, inplace=True)
+
+    # 4. KIỂM TRA LẠI SAU KHI MAP
     required_cols = ['ma_vtma', 'ten_thuoc', 'ten_cong_ty', 'hoat_chat', 'ham_luong', 'dang_bao_che']
     missing = [c for c in required_cols if c not in df.columns]
     
     if missing:
-        st.error(f"⚠️ File CSV thiếu cột hoặc sai tên cột: {missing}")
-        st.write("Các cột đọc được:", df.columns.tolist())
-        return None
+        st.error("⚠️ LỖI CẤU TRÚC FILE CSV")
+        st.error(f"Phần mềm cần cột: **{required_cols}**")
+        st.warning(f"Nhưng trong file của bạn sau khi đọc chỉ có: {df.columns.tolist()}")
+        st.info("💡 Gợi ý: Hãy mở file CSV bằng Excel, sửa dòng đầu tiên (Header) thành: vtma code, product, manufacturer, molecule, galenic, unit_measure")
+        st.stop()
 
-    # Tạo dữ liệu text chuẩn hóa (Normalized Data) để thuật toán chạy
+    # 5. Xử lý dữ liệu text (Logic cũ)
     df['norm_name'] = df['ten_thuoc'].apply(normalize_text)
     df['norm_brand'] = df['ten_cong_ty'].apply(normalize_text)
     df['norm_active'] = df['hoat_chat'].apply(normalize_text)
     df['norm_form'] = df['dang_bao_che'].apply(normalize_text)
     df['norm_strength'] = df['ham_luong'].apply(normalize_text)
 
-    # Cột hiển thị đẹp
+    # Cột hiển thị
     if 'sku_full' in df.columns:
         df['display_name'] = df['sku_full']
     else:
         df['display_name'] = df['ten_thuoc'] + " " + df['ham_luong']
 
     return df
-
 def calculate_weighted_score(input_str, row_data, ml_predicted_brand=None):
     """
     Tính điểm khớp (0-100) dựa trên 5 tiêu chí + Điểm thưởng AI
