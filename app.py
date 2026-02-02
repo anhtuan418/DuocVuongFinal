@@ -8,6 +8,7 @@ import pickle
 from collections import Counter
 import google.generativeai as genai
 import time
+import random
 
 # =============================================================================
 # 1. CẤU HÌNH TRANG
@@ -15,7 +16,7 @@ import time
 st.set_page_config(page_title="PharmaMaster AI", layout="wide", page_icon="🧬")
 
 # =============================================================================
-# 2. CLASS GEMINI AI (DYNAMIC SELECTOR)
+# 2. CLASS GEMINI AI (CÓ CHẾ ĐỘ CHỜ & THỬ LẠI)
 # =============================================================================
 class GeminiAgent:
     def __init__(self, api_key, model_name):
@@ -35,6 +36,9 @@ class GeminiAgent:
             self.is_ready = False
 
     def smart_match(self, input_drug, candidates_df):
+        """
+        Gửi yêu cầu với cơ chế Retry (Thử lại) khi gặp lỗi 429
+        """
         if not self.is_ready: return "⚠️ Lỗi: Chưa chọn Model hoặc API Key sai"
 
         candidates_str = ""
@@ -52,11 +56,23 @@ class GeminiAgent:
         Nếu không khớp >70%, trả về: "NONE | - | Không tìm thấy"
         """
         
-        try:
-            response = self.model.generate_content(prompt)
-            return response.text.strip()
-        except Exception as e:
-            return f"AI Error: {str(e)}"
+        # --- CƠ CHẾ THỬ LẠI THÔNG MINH (RETRY LOGIC) ---
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = self.model.generate_content(prompt)
+                return response.text.strip()
+            except Exception as e:
+                error_str = str(e)
+                # Nếu gặp lỗi 429 (Quota) hoặc quá tải
+                if "429" in error_str or "quota" in error_str.lower():
+                    wait_time = (attempt + 1) * 5 + random.uniform(0, 2) # Chờ 5s, 10s, 15s...
+                    time.sleep(wait_time) # Nghỉ ngơi
+                    continue # Thử lại
+                else:
+                    return f"AI Error: {error_str}"
+        
+        return "⚠️ AI Busy (Hết hạn mức, vui lòng chờ 1 phút)"
 
 # =============================================================================
 # 3. CLASS MACHINE LEARNING (PHARMA BRAIN)
@@ -271,7 +287,7 @@ if 'db_vtma' not in st.session_state:
         if df_loaded is not None: st.session_state.db_vtma = df_loaded
         else: st.stop()
 
-# --- SIDEBAR: CẤU HÌNH API ĐỘNG (FIX LỖI 404) ---
+# --- SIDEBAR: CẤU HÌNH API ĐỘNG ---
 with st.sidebar:
     st.header("🤖 Cấu hình Gemini AI")
     api_key = st.text_input("Nhập Google API Key", type="password")
@@ -280,26 +296,28 @@ with st.sidebar:
     if api_key:
         try:
             genai.configure(api_key=api_key)
-            # Lấy danh sách model thực tế từ Google
             all_models = genai.list_models()
             for m in all_models:
-                # Chỉ lấy model nào hỗ trợ generateContent
                 if 'generateContent' in m.supported_generation_methods:
                      valid_models.append(m.name.replace("models/", ""))
         except:
             st.error("API Key lỗi hoặc không kết nối được!")
 
     if valid_models:
-        # Tự động chọn flash hoặc pro nếu có
+        # Cố gắng chọn flash làm mặc định (an toàn nhất cho Free Tier)
         default_ix = 0
         if 'gemini-1.5-flash' in valid_models:
             default_ix = valid_models.index('gemini-1.5-flash')
-        elif 'gemini-1.5-pro' in valid_models:
-            default_ix = valid_models.index('gemini-1.5-pro')
-            
+        elif 'gemini-1.5-pro-latest' in valid_models:
+             # Nếu có bản pro latest thì dùng
+            default_ix = valid_models.index('gemini-1.5-pro-latest')
+
         selected_model = st.selectbox("Chọn Model AI:", valid_models, index=default_ix)
         
-        # Khởi tạo Agent với model CHÍNH XÁC
+        # Cảnh báo nếu chọn model 2.5 (thường bị lỗi 0 quota)
+        if "2.5" in selected_model:
+            st.warning("⚠️ Model 2.5 thường bị giới hạn Quota. Hãy dùng 'gemini-1.5-flash' nếu gặp lỗi.")
+
         st.session_state.gemini = GeminiAgent(api_key, selected_model)
         st.success(f"✅ Đã kết nối: {selected_model}")
     else:
@@ -379,11 +397,14 @@ with tab1:
                         count = 0
                         
                         for idx, row in target_rows.iterrows():
-                            # Logic: Chỉ check nếu Điểm < 90 (Nghi ngờ)
+                            # Chỉ check nếu Điểm < 90
                             if row['Diem_Tong'] < 90:
                                 candidates = get_candidates(row['Input_Goc'], st.session_state.db_vtma, limit=15)
                                 ai_response = st.session_state.gemini.smart_match(row['Input_Goc'], candidates)
                                 st.session_state.result_df.at[idx, 'AI_Suggestion'] = f"🤖 {ai_response}"
+                                
+                                # --- THÊM DELAY ĐỂ TRÁNH LỖI 429 ---
+                                time.sleep(2) # Nghỉ 2 giây sau mỗi lần hỏi
                             
                             count += 1
                             my_bar.progress(count / len(target_rows))
@@ -411,6 +432,9 @@ with tab1:
                                 candidates = get_candidates(row['Input_Goc'], st.session_state.db_vtma, limit=30)
                                 ai_response = st.session_state.gemini.smart_match(row['Input_Goc'], candidates)
                                 st.session_state.result_df.at[idx, 'AI_Suggestion'] = f"🔍 {ai_response}"
+                                
+                                # --- THÊM DELAY ĐỂ TRÁNH LỖI 429 ---
+                                time.sleep(2) # Nghỉ 2 giây sau mỗi lần hỏi
                                 
                                 count += 1
                                 my_bar.progress(count / len(hard_cases))
