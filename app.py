@@ -1,217 +1,156 @@
 import streamlit as st
 import pandas as pd
 import google.generativeai as genai
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 import unidecode
 import json
+import time
 import os
-import re
 from datetime import datetime
 
 # --- CẤU HÌNH ---
-st.set_page_config(page_title="PharmaMatch: Logic Phân Tầng", layout="wide")
+st.set_page_config(page_title="Dược Vương Mapping Tool", layout="wide")
 
-# --- HÀM CHUẨN HÓA ---
 def normalize_text(text):
     if pd.isna(text): return ""
-    text = str(text).lower()
-    text = unidecode.unidecode(text)
-    return text.strip()
+    return unidecode.unidecode(str(text).lower()).strip()
 
-# --- HÀM TÁCH SỐ TỪ HÀM LƯỢNG (Để so sánh chính xác) ---
-def extract_numbers(text):
-    """Lấy các con số từ chuỗi hàm lượng. VD: '160mg/4.5mcg' -> {'160', '4.5'}"""
-    if pd.isna(text): return set()
-    # Tìm các số (bao gồm cả số thập phân)
-    nums = re.findall(r"\d+\.?\d*", str(text))
-    return set(nums)
-
-# --- LOAD DATA ---
-@st.cache_data
-def load_vtma_data():
-    try:
-        df = pd.read_csv("data/vtma_standard.csv")
-        # Chuẩn hóa trước để tìm kiếm nhanh
-        df['norm_name'] = df['ten_thuoc'].apply(normalize_text)
-        df['norm_strength'] = df['ham_luong'].apply(normalize_text)
-        df['norm_ingre'] = df['hoat_chat'].apply(normalize_text)
-        df['norm_manu'] = df['ten_cong_ty'].apply(normalize_text)
-        return df
-    except:
-        return pd.DataFrame()
-
-# --- AI PHÂN TÁCH THÔNG TIN (Quan trọng nhất) ---
-def ai_parse_product(product_raw_name, api_key):
+# --- GỌI AI GEMINI ---
+def get_ai_info(product_name, api_key):
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel('gemini-1.5-flash')
-        
-        # Prompt bắt buộc AI tách riêng Hàm Lượng
+        # Prompt được tối ưu để trả về đúng cấu trúc so sánh
         prompt = f"""
-        Nhiệm vụ: Trích xuất thông tin dược phẩm từ chuỗi: "{product_raw_name}".
-        Yêu cầu trả về JSON chính xác:
-        - "brand_name": Tên biệt dược (VD: Panadol, Symbicort)
-        - "strength": Hàm lượng số (VD: 500mg, 160/4.5, 10mg). Nếu không có ghi null.
-        - "active_ingredient": Hoạt chất.
-        - "manufacturer": Tên hãng/nước.
+        Phân tích thuốc: "{product_name}". 
+        Trả về JSON keys: 
+        "active_ingredient" (hoạt chất chính, tiếng anh càng tốt), 
+        "brand_name" (tên biệt dược ngắn gọn), 
+        "strength" (hàm lượng số+đơn vị), 
+        "manufacturer" (tên hãng sản xuất),
+        "dosage_form" (dạng bào chế: viên, gói, ống...).
+        Nếu không rõ thì để null.
         """
         response = model.generate_content(prompt)
         text = response.text.replace('```json', '').replace('```', '').strip()
         return json.loads(text)
     except:
-        # Fallback nếu AI lỗi: Trả về chính cái tên đó
-        return {"brand_name": product_raw_name, "strength": "", "active_ingredient": "", "manufacturer": ""}
+        return {}
 
-# --- LOGIC MAP PHÂN TẦNG (HIERARCHICAL) ---
-def hierarchical_match(input_data, vtma_df):
-    """
-    Input: Dữ liệu đã được AI làm sạch (Tên, Hàm lượng...)
-    Logic:
-    1. Lọc theo Tên (Brand Name) -> Lấy Top 30 ứng viên.
-    2. So hàm lượng (Strength) -> Re-rank lại Top 30 này.
-    3. So các tiêu chí phụ.
-    """
+# --- TÍNH ĐIỂM KHỚP (LOGIC MỚI CHO FILE VTMA CHUẨN) ---
+def calculate_score(input_item, db_row):
+    score = 0
     
-    input_brand = normalize_text(input_data.get('brand_name', ''))
-    input_strength = normalize_text(input_data.get('strength', ''))
-    input_ingre = normalize_text(input_data.get('active_ingredient', ''))
-    input_manu = normalize_text(input_data.get('manufacturer', ''))
+    # 1. SO KHỚP HOẠT CHẤT (Quan trọng nhất - 40%)
+    # So cột 'hoat_chat' (Cột D trong file VTMA)
+    if input_item.get('active_ingredient'):
+        score += fuzz.token_sort_ratio(normalize_text(input_item['active_ingredient']), normalize_text(db_row['hoat_chat'])) * 0.4
     
-    # BƯỚC 1: LỌC THEO TÊN (Ưu tiên số 1)
-    # Dùng rapidfuzz lấy nhanh 30 mã có tên giống nhất trong toàn bộ DB
-    # threshold=60: Tên phải giống ít nhất 60% mới được xét tiếp
-    candidates = process.extract(
-        input_brand, 
-        vtma_df['norm_name'], 
-        limit=50, 
-        scorer=fuzz.token_set_ratio
-    )
-    
-    # Lấy ra index của các ứng viên này
-    candidate_indices = [x[2] for x in candidates if x[1] >= 50]
-    
-    if not candidate_indices:
-        return None, 0, "Không tìm thấy tên tương tự"
-
-    subset_df = vtma_df.iloc[candidate_indices].copy()
-    
-    # BƯỚC 2: TÍNH ĐIỂM CHI TIẾT CHO TỪNG ỨNG VIÊN
-    results = []
-    
-    input_nums = extract_numbers(input_strength) # VD: {160, 4.5}
-    
-    for idx, row in subset_df.iterrows():
-        # ĐIỂM TÊN (Base Score): Max 40đ
-        name_score = fuzz.token_set_ratio(input_brand, row['norm_name']) * 0.4
+    # 2. SO KHỚP HÀM LƯỢNG (30%)
+    # So cột 'ham_luong' (Cột G trong file VTMA)
+    if input_item.get('strength'):
+        s_score = fuzz.ratio(normalize_text(input_item['strength']), normalize_text(db_row['ham_luong']))
+        score += s_score * 0.3
         
-        # ĐIỂM HÀM LƯỢNG (Critical): Max 40đ
-        # Logic cứng: Nếu Input có số mà VTMA không có số đó -> PHẠT NẶNG
-        str_score = 0
-        row_nums = extract_numbers(row['norm_strength'])
-        
-        if not input_nums: 
-            # Nếu Input không ghi hàm lượng, so sánh chuỗi mờ
-            str_score = fuzz.ratio(input_strength, row['norm_strength']) * 0.4
-        else:
-            # Nếu Input có số (VD: 500), check xem VTMA có số 500 ko
-            # Nếu tập số khớp nhau (VD: input {160, 4.5} vs row {160, 4.5}) -> Điểm tuyệt đối
-            if input_nums.issubset(row_nums) or row_nums.issubset(input_nums):
-                str_score = 40 # Max điểm
-            else:
-                str_score = 0 # Phạt về 0 nếu lệch số (VD: 10 vs 15)
-        
-        # ĐIỂM PHỤ (Hoạt chất + Hãng): Max 20đ
-        ing_score = fuzz.token_sort_ratio(input_ingre, row['norm_ingre']) * 0.1
-        manu_score = fuzz.partial_ratio(input_manu, row['norm_manu']) * 0.1
-        
-        final_score = name_score + str_score + ing_score + manu_score
-        
-        results.append({
-            'row': row,
-            'score': final_score,
-            'reason': f"Tên:{int(name_score)} + HL:{int(str_score)}"
-        })
+    # 3. SO KHỚP TÊN THƯƠNG MẠI (20%)
+    # So cột 'ten_thuoc' (Cột C - tên ngắn gọn như A.T DOMPERIDON) thay vì tên đầy đủ
+    brand_score = fuzz.token_set_ratio(normalize_text(input_item.get('brand_name','')), normalize_text(db_row['ten_thuoc']))
+    score += brand_score * 0.2
     
-    # Sắp xếp lấy cao nhất
-    results.sort(key=lambda x: x['score'], reverse=True)
-    
-    if results:
-        best = results[0]
-        return best['row'], best['score'], best['reason']
-    else:
-        return None, 0, "Không khớp logic"
+    # 4. NHÀ SẢN XUẤT (10%)
+    # So cột 'ten_cong_ty' (Cột F - AN THIEN_A.T PHARM)
+    if input_item.get('manufacturer'):
+        manu_score = fuzz.partial_ratio(normalize_text(input_item['manufacturer']), normalize_text(db_row['ten_cong_ty']))
+        score += manu_score * 0.1
+        
+    return round(score, 1)
 
 # --- GIAO DIỆN ---
-st.title("🛡️ PharmaMatch: Chế Độ Map Chính Xác (Strict Mode)")
-st.info("Logic mới: Tên thuốc (Ưu tiên 1) -> Hàm lượng (Bắt buộc khớp số) -> Các thông tin khác.")
+st.title("💊 Dược Vương Mapping Tool (Phiên bản VTMA Chuẩn)")
 
 with st.sidebar:
-    st.header("Cấu hình")
+    st.header("Cài đặt")
     user_api_key = st.text_input("Gemini API Key", type="password")
     if not user_api_key and "GENAI_API_KEY" in st.secrets:
         user_api_key = st.secrets["GENAI_API_KEY"]
-    
-    st.warning("⚠️ Chế độ này sẽ gọi AI cho TẤT CẢ các dòng để đảm bảo chính xác nhất. Tốc độ sẽ chậm hơn (khoảng 3-4s/dòng).")
+        
+    threshold = st.slider("Độ chính xác (%)", 0, 100, 50)
+    top_n = st.number_input("Số mã gợi ý", 1, 10, 3)
 
-vtma_df = load_vtma_data()
-if vtma_df.empty:
-    st.error("Chưa có file data!")
+# Load Data VTMA
+try:
+    vtma_df = pd.read_csv("data/vtma_standard.csv")
+    st.success(f"✅ Đã tải {len(vtma_df)} mã VTMA. Hệ thống sẵn sàng!")
+except FileNotFoundError:
+    st.error("❌ Lỗi: Không tìm thấy file data/vtma_standard.csv. Hãy chắc chắn anh/chị đã lưu file vào đúng thư mục data.")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ Lỗi đọc file CSV: {e}. Hãy đảm bảo file CSV được lưu với Encoding UTF-8.")
     st.stop()
 
-uploaded = st.file_uploader("Upload File Dược Vương", type=['xlsx', 'csv'])
+# Upload File Dược Vương
+uploaded = st.file_uploader("Chọn file Danh mục Dược Vương (Excel/CSV)", type=['xlsx', 'csv'])
 
-if uploaded and st.button("🚀 CHẠY MAP CHÍNH XÁC"):
+if uploaded and st.button("🚀 CHẠY MAPPING"):
     if not user_api_key:
-        st.error("Cần API Key để phân tích hàm lượng!")
+        st.warning("⚠️ Chưa nhập API Key!")
         st.stop()
         
     if uploaded.name.endswith('.csv'): df_in = pd.read_csv(uploaded)
     else: df_in = pd.read_excel(uploaded)
     
     col_name = df_in.columns[0]
-    results = []
+    st.info(f"Đang xử lý cột tên: {col_name}")
     
-    bar = st.progress(0, text="Đang khởi động AI...")
+    results = []
+    bar = st.progress(0)
     
     for i, row in df_in.iterrows():
         raw = str(row[col_name])
+        ai_data = get_ai_info(raw, user_api_key)
         
-        # 1. AI Phân tích (Bắt buộc)
-        ai_data = ai_parse_product(raw, user_api_key)
+        matches = []
+        for _, v_row in vtma_df.iterrows():
+            s = calculate_score(ai_data, v_row)
+            if s >= threshold:
+                matches.append({
+                    'ma_thuoc': v_row['ma_thuoc'],
+                    'ten_thuoc': v_row['ten_thuoc'],
+                    'hoat_chat': v_row['hoat_chat'],
+                    'ham_luong': v_row['ham_luong'],
+                    'ten_cong_ty': v_row['ten_cong_ty'], # Lấy chính xác cột F
+                    'dang_bao_che': v_row['dang_bao_che'],
+                    'score': s
+                })
         
-        # 2. Logic Phân Tầng
-        match_row, score, reason = hierarchical_match(ai_data, vtma_df)
+        matches = sorted(matches, key=lambda x: x['score'], reverse=True)[:top_n]
         
-        # 3. Ghi log
-        res = {
-            'DV_Input': raw,
-            'AI_Hieu_La': f"{ai_data.get('brand_name')} | HL: {ai_data.get('strength')}",
-            'VTMA_Code': '',
-            'VTMA_Name': '',
-            'VTMA_HamLuong': '',
-            'Match_Score': score,
-            'Chi_Tiet_Diem': reason,
-            'Danh_Gia': 'Thấp'
-        }
+        if not matches:
+            results.append({'DV_Input': raw, 'Status': 'Không tìm thấy'})
+        else:
+            for m in matches:
+                # Logic đánh giá
+                danh_gia = 'Cao' if m['score'] > 85 else ('Trung bình' if m['score'] > 60 else 'Thấp')
+                
+                results.append({
+                    'DV_Input': raw,
+                    'AI_Hieu_La': f"{ai_data.get('brand_name')} / {ai_data.get('active_ingredient')} / {ai_data.get('strength')}",
+                    'VTMA_Code': m['ma_thuoc'],
+                    'VTMA_Name': m['ten_thuoc'],
+                    'VTMA_HoatChat': m['hoat_chat'],
+                    'VTMA_HamLuong': m['ham_luong'],
+                    'VTMA_NSX': m['ten_cong_ty'],
+                    'Match_Score': m['score'],
+                    'Do_Tin_Cay': danh_gia
+                })
+        bar.progress((i+1)/len(df_in))
         
-        if match_row is not None:
-            res.update({
-                'VTMA_Code': match_row['ma_thuoc'],
-                'VTMA_Name': match_row['ten_thuoc'],
-                'VTMA_HamLuong': match_row['ham_luong'],
-                'Danh_Gia': 'Cao' if score > 70 else 'Kiểm tra lại'
-            })
-            
-        results.append(res)
-        bar.progress((i+1)/len(df_in), text=f"Đang xử lý: {raw}")
-        
-    final_df = pd.DataFrame(results)
-    st.success("Hoàn thành mapping!")
-    st.dataframe(final_df)
+    res_df = pd.DataFrame(results)
+    st.dataframe(res_df)
     
-    # Download
+    # Download logic
     os.makedirs('output', exist_ok=True)
-    fname = f"output/map_chinhxac_{datetime.now().strftime('%H%M')}.xlsx"
-    final_df.to_excel(fname, index=False)
+    fname = f"output/ket_qua_{datetime.now().strftime('%H%M')}.xlsx"
+    res_df.to_excel(fname, index=False)
     with open(fname, "rb") as f:
-        st.download_button("📥 Tải kết quả", f, file_name="ket_qua_chinh_xac.xlsx")
+        st.download_button("📥 Tải kết quả Mapping", f, file_name="ket_qua_map.xlsx")
