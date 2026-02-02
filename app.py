@@ -6,14 +6,65 @@ import re
 import os
 import pickle
 from collections import Counter
+import google.generativeai as genai
+import time
 
 # =============================================================================
 # 1. CẤU HÌNH TRANG
 # =============================================================================
-st.set_page_config(page_title="PharmaMaster: Final Fix", layout="wide", page_icon="💊")
+st.set_page_config(page_title="PharmaMaster AI: Gemini Powered", layout="wide", page_icon="🧬")
 
 # =============================================================================
-# 2. CLASS MACHINE LEARNING (GIỮ NGUYÊN)
+# 2. CLASS GEMINI AI (BỘ NÃO DƯỢC SĨ)
+# =============================================================================
+class GeminiAgent:
+    def __init__(self, api_key):
+        if api_key:
+            genai.configure(api_key=api_key)
+            self.model = genai.GenerativeModel('gemini-pro')
+            self.is_ready = True
+        else:
+            self.is_ready = False
+
+    def smart_match(self, input_drug, candidates_df):
+        """
+        Gửi Input và Danh sách ứng viên cho Gemini để nó chọn.
+        """
+        if not self.is_ready: return None
+
+        # Chuyển ứng viên thành chuỗi văn bản để Gemini đọc
+        # Chỉ lấy các cột cần thiết để tiết kiệm Token
+        candidates_str = ""
+        for idx, row in candidates_df.iterrows():
+            candidates_str += f"- ID: {row['ma_vtma']} | Tên: {row['ten_thuoc']} | Hàm lượng: {row['ham_luong']} | NSX: {row['ten_cong_ty']}\n"
+
+        prompt = f"""
+        Bạn là Chuyên gia Dữ liệu Dược phẩm. Hãy giúp tôi khớp tên thuốc.
+        
+        INPUT CỦA TÔI: "{input_drug}"
+        
+        DANH SÁCH MÃ CHUẨN TRONG DATABASE (CANDIDATES):
+        {candidates_str}
+        
+        YÊU CẦU:
+        1. Hãy phân tích Input (Tên, Hoạt chất, Hàm lượng, Dạng bào chế, Hãng).
+        2. So sánh với danh sách Candidates.
+        3. Chọn ra 1 mã ID khớp nhất (Match chính xác hoặc tương đương sinh học).
+        4. Nếu không có mã nào khớp > 80% về mặt dược học, hãy trả về "NONE".
+        
+        ĐỊNH DẠNG TRẢ VỀ (Chỉ trả về 1 dòng duy nhất):
+        ID_CHON | ĐỘ_TIN_CẬY (Cao/TB/Thap) | LÝ_DO_NGẮN_GỌN
+        Ví dụ: VTMA_001 | Cao | Khớp hoàn toàn tên và hàm lượng
+        """
+        
+        try:
+            response = self.model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            return f"ERROR: {str(e)}"
+
+# =============================================================================
+# 3. CLASS MACHINE LEARNING CŨ (PHARMA BRAIN)
 # =============================================================================
 class PharmaBrain:
     def __init__(self):
@@ -70,24 +121,16 @@ class PharmaBrain:
         return False
 
 # =============================================================================
-# 3. XỬ LÝ DỮ LIỆU & LOAD FILE
+# 4. XỬ LÝ DỮ LIỆU & LOAD FILE
 # =============================================================================
-
 def normalize_text(text):
     if pd.isna(text): return ""
     return unidecode.unidecode(str(text).lower()).strip()
 
 def extract_numbers(text):
-    """
-    Trích xuất số thông minh. 
-    Femoston 1/10 -> {1.0, 10.0}
-    """
     if pd.isna(text): return set()
-    # Thay các ký tự phân cách bằng khoảng trắng để tách số dính nhau (1mg/5mg)
     clean_text = str(text).replace('/', ' ').replace('-', ' ').replace('+', ' ')
-    # Regex lấy số thực
     nums = re.findall(r"\d+\.?\d*", clean_text)
-    # Chuyển về float để so sánh (1.0 == 1)
     return {float(n) for n in nums}
 
 @st.cache_data
@@ -98,7 +141,6 @@ def load_master_data():
         return None
 
     try:
-        # Ưu tiên đọc utf-8-sig (để xử lý BOM)
         df = pd.read_csv(file_path, sep=None, engine='python', encoding='utf-8-sig')
     except:
         try:
@@ -107,16 +149,14 @@ def load_master_data():
             st.error(f"❌ Lỗi đọc file: {e}")
             return None
 
-    # Chuẩn hóa tên cột: Bỏ BOM, chữ thường, bỏ khoảng trắng
     df.columns = df.columns.str.strip().str.lower().str.replace('\ufeff', '').str.replace('ï»¿', '')
     
-    # Mapping Cột (Theo ảnh image_f5fcd8.png của bạn)
     mapping_dict = {
-        'ma_vtma': ['ma_thuoc', 'vtma code'],
-        'ten_thuoc': ['ten_thuoc', 'product'],
+        'ma_vtma': ['ma_thuoc', 'vtma code', 'code'],
+        'ten_thuoc': ['ten_thuoc', 'product', 'name'],
         'hoat_chat': ['hoat_chat', 'molecule'],
         'ten_cong_ty': ['ten_cong_ty', 'manufacturer', 'ten_tap_doan'],
-        'ham_luong': ['ham_luong', 'galenic'],
+        'ham_luong': ['ham_luong', 'galenic', 'nong do'],
         'dang_bao_che': ['dang_bao_che', 'unit_measure', 'dang_dung'],
         'sku_full': ['ten_day_du', 'sku', 'product_name'] 
     }
@@ -124,19 +164,16 @@ def load_master_data():
     final_rename = {}
     current_cols = df.columns.tolist()
     for std, aliases in mapping_dict.items():
-        found = False
         for alias in aliases:
             if alias in current_cols:
                 final_rename[alias] = std
-                found = True
                 break
     
     if final_rename: df.rename(columns=final_rename, inplace=True)
     
-    # Tạo các cột chuẩn hóa
     required = ['ma_vtma', 'ten_thuoc', 'ten_cong_ty', 'hoat_chat', 'ham_luong', 'dang_bao_che']
     for col in required:
-        if col not in df.columns: df[col] = "" # Tạo cột rỗng nếu thiếu
+        if col not in df.columns: df[col] = "" 
         df[col] = df[col].astype(str).replace('nan', '')
 
     df['norm_name'] = df['ten_thuoc'].apply(normalize_text)
@@ -145,7 +182,6 @@ def load_master_data():
     df['norm_strength'] = df['ham_luong'].apply(normalize_text)
     df['norm_form'] = df['dang_bao_che'].apply(normalize_text)
     
-    # Search Index để lọc sơ bộ
     df['search_index'] = df.apply(lambda x: f"{x['norm_name']} {x['norm_active']} {x['norm_strength']}", axis=1)
 
     if 'sku_full' in df.columns and len(df['sku_full']) > 0:
@@ -156,105 +192,68 @@ def load_master_data():
     return df
 
 # =============================================================================
-# 4. THUẬT TOÁN TÍNH ĐIỂM (CORE ENGINE - ĐÃ FIX FEMOSTON)
+# 5. CORE ENGINE (FUZZY LOGIC)
 # =============================================================================
-
 def calculate_detailed_score(input_str, row_data, ml_predicted_brand=None):
     norm_input = normalize_text(input_str)
-    
-    # 1. Tên thuốc (40%)
     score_name = fuzz.token_set_ratio(norm_input, row_data['norm_name'])
-    
-    # 2. Hãng (20%)
     score_brand = fuzz.partial_ratio(row_data['norm_brand'], norm_input)
     
-    # 3. Hoạt chất (20%)
     score_active = 0
-    if row_data['norm_active']:
-        score_active = fuzz.token_set_ratio(row_data['norm_active'], norm_input)
-    else:
-        score_active = 50 # Không có dữ liệu hoạt chất thì cho điểm trung bình
+    if row_data['norm_active']: score_active = fuzz.token_set_ratio(row_data['norm_active'], norm_input)
+    else: score_active = 50 
 
-    # 4. Hàm lượng (10%) - LOGIC MỚI CHO FEMOSTON 1/10
     input_nums = extract_numbers(input_str)
     row_nums = extract_numbers(row_data['ham_luong'])
-    
     score_strength = 0
-    if not row_nums:
-        score_strength = 50
-    elif not input_nums:
-        score_strength = 50
+    if not row_nums or not input_nums: score_strength = 50
     else:
-        # Giao thoa số: Input {1, 10}, Row {1, 5} -> Giao {1} -> Sai
-        # Input {1, 10}, Row {1, 10} -> Giao {1, 10} -> Đúng
         intersection = input_nums.intersection(row_nums)
-        
-        if len(intersection) == len(input_nums) and len(intersection) == len(row_nums):
-            score_strength = 100 # Khớp hoàn toàn bộ số
-        elif len(intersection) > 0:
-            # Có khớp 1 phần (Ví dụ khớp số 1 nhưng lệch số 10)
-            # PHẠT NẶNG: Nếu số lượng số khác nhau -> Trừ điểm
-            score_strength = 40 
-        else:
-            score_strength = 0 # Không khớp số nào
+        if len(intersection) == len(input_nums) and len(intersection) == len(row_nums): score_strength = 100 
+        elif len(intersection) > 0: score_strength = 40 
+        else: score_strength = 0
 
-    # 5. Dạng bào chế (10%)
     score_form = fuzz.partial_ratio(row_data['norm_form'], norm_input)
     
-    # TỔNG HỢP
     base_score = (score_name*0.4) + (score_brand*0.2) + (score_active*0.2) + (score_strength*0.1) + (score_form*0.1)
     
-    # AI BONUS
     ml_bonus = 0
     if ml_predicted_brand and row_data['norm_brand']:
         if fuzz.token_set_ratio(normalize_text(ml_predicted_brand), row_data['norm_brand']) > 85:
             ml_bonus = 15
 
-    final_score = min(base_score + ml_bonus, 100)
-
-    # TRẢ VỀ DICTIONARY ĐỂ TÁCH CỘT
     return {
-        'total': final_score,
-        's_name': score_name,
-        's_brand': score_brand,
-        's_active': score_active,
-        's_strength': score_strength,
-        's_form': score_form,
-        'ml_bonus': ml_bonus
+        'total': min(base_score + ml_bonus, 100),
+        's_name': score_name, 's_brand': score_brand, 's_active': score_active,
+        's_strength': score_strength, 's_form': score_form, 'ml_bonus': ml_bonus
     }
+
+def get_candidates(input_text, db_df, limit=20):
+    """Hàm phụ trợ: Chỉ lấy danh sách ứng viên (chưa chấm điểm kỹ)"""
+    if 'search_index' not in db_df.columns:
+        db_df['search_index'] = db_df.apply(lambda x: f"{x['norm_name']} {x['norm_active']} {x['norm_strength']}", axis=1)
+    
+    norm_input = normalize_text(input_text)
+    candidates = process.extract(norm_input, db_df['search_index'], limit=limit, scorer=fuzz.token_set_ratio)
+    indices = [x[2] for x in candidates]
+    return db_df.iloc[indices].copy()
 
 def search_product_v3(input_text, db_df, brain_model, min_score=50, top_n=3):
     predicted_brand = brain_model.predict_brand(input_text)
-    norm_input = normalize_text(input_text)
     
-    # B1: Lọc sơ bộ (Search Index) - Quan trọng để bắt Femoston
-    candidates = process.extract(
-        norm_input, 
-        db_df['search_index'], 
-        limit=100, 
-        scorer=fuzz.token_set_ratio
-    )
+    # 1. Lấy ứng viên tiềm năng
+    subset = get_candidates(input_text, db_df, limit=50) # Lấy 50 để lọc cho chắc
     
-    # Lấy index ứng viên (ngưỡng thấp 30% để không bỏ sót)
-    candidate_indices = [x[2] for x in candidates if x[1] > 30]
-    
-    if not candidate_indices: return []
-
-    subset = db_df.iloc[candidate_indices].copy()
     results = []
-    
-    # B2: Chấm điểm chi tiết
     for idx, row in subset.iterrows():
         scores = calculate_detailed_score(input_text, row, ml_predicted_brand=predicted_brand)
-        
         if scores['total'] >= min_score:
             results.append({
                 'Mã VTMA': row['ma_vtma'],
                 'Tên Thuốc (SKU)': row['display_name'],
                 'NSX': row['ten_cong_ty'],
-                'Hàm Lượng': row['ham_luong'], # Hiện thêm cột này để check
+                'Hàm Lượng': row['ham_luong'], 
                 'Điểm Tổng': round(scores['total'], 1),
-                # Các cột điểm chi tiết
                 'Điểm Tên (40%)': int(scores['s_name']),
                 'Điểm Hãng (20%)': int(scores['s_brand']),
                 'Điểm HoạtChất (20%)': int(scores['s_active']),
@@ -267,7 +266,7 @@ def search_product_v3(input_text, db_df, brain_model, min_score=50, top_n=3):
     return results[:top_n]
 
 # =============================================================================
-# 5. GIAO DIỆN CHÍNH
+# 6. GIAO DIỆN STREAMLIT
 # =============================================================================
 
 if 'brain' not in st.session_state:
@@ -275,25 +274,39 @@ if 'brain' not in st.session_state:
     st.session_state.brain.load_model()
 
 if 'db_vtma' not in st.session_state:
-    with st.spinner("⏳ Đang tải dữ liệu chuẩn (VTMA)..."):
+    with st.spinner("⏳ Đang tải dữ liệu chuẩn..."):
         df_loaded = load_master_data()
         if df_loaded is not None: st.session_state.db_vtma = df_loaded
         else: st.stop()
 
+# --- SIDEBAR: CẤU HÌNH API ---
 with st.sidebar:
-    st.header("⚙️ Cấu hình")
-    # Điều chỉnh mặc định về 60 để lọc bớt rác
+    st.header("🤖 Cấu hình Gemini AI")
+    api_key = st.text_input("Nhập Google API Key", type="password", help="Lấy tại: aistudio.google.com")
+    
+    if api_key:
+        st.session_state.gemini = GeminiAgent(api_key)
+        st.success("Gemini đã sẵn sàng!")
+    else:
+        st.warning("Nhập API Key để dùng tính năng AI cao cấp.")
+        st.session_state.gemini = GeminiAgent(None)
+
+    st.divider()
+    st.header("⚙️ Cấu hình Map")
     min_score = st.slider("Min Score (%)", 0, 100, 60) 
-    top_n = st.number_input("Top N (Số kết quả)", 1, 10, 3)
-    st.info(f"Database: {len(st.session_state.db_vtma)} SKU")
+    top_n = st.number_input("Top N", 1, 10, 3)
+    
+    # Cấu hình cho tính năng 2
+    st.subheader("⚙️ Cấu hình AI Rà Soát")
+    threshold_ai = st.number_input("Ngưỡng kích hoạt AI (xx)", 0, 100, 70, help="Dưới điểm này AI sẽ tự tìm lại")
 
-st.title("💊 PharmaMaster: Final Edition (Font Fix + Multi-Columns)")
+st.title("🧬 PharmaMaster: AI-Powered Mapping")
 
-tab1, tab2 = st.tabs(["🚀 Mapping & Báo Cáo", "🧠 Training AI"])
+tab1, tab2 = st.tabs(["🚀 Mapping & Gemini", "🧠 Training Model"])
 
 with tab1:
-    st.subheader("Mapping File Excel")
-    uploaded = st.file_uploader("Upload file Excel cần map", type=['xlsx', 'csv'])
+    st.subheader("Mapping Dữ Liệu")
+    uploaded = st.file_uploader("Upload file Excel", type=['xlsx', 'csv'])
     
     if uploaded:
         if uploaded.name.endswith('.csv'): df_in = pd.read_csv(uploaded)
@@ -302,7 +315,8 @@ with tab1:
         st.write(f"Đã nhận {len(df_in)} dòng.")
         col_target = st.selectbox("Chọn cột Tên thuốc:", df_in.columns)
         
-        if st.button("🚀 CHẠY MAPPING"):
+        # --- NÚT 1: CHẠY MAP CƠ BẢN (FUZZY) ---
+        if st.button("🚀 BƯỚC 1: CHẠY MAPPING CƠ BẢN"):
             all_results = []
             bar = st.progress(0)
             
@@ -312,68 +326,101 @@ with tab1:
                 
                 if matches:
                     for rank, m in enumerate(matches, 1):
-                        # --- LOGIC MỚI: XÁC ĐỊNH TRẠNG THÁI ---
                         current_score = m['Điểm Tổng']
-                        status = ""
+                        status = "Khớp 100%" if current_score == 100 else ("Khớp cao" if rank == 1 else ("Trung bình" if current_score >= 70 else "Thấp"))
                         
-                        if current_score == 100:
-                            status = "Khớp 100%"
-                        elif rank == 1:
-                            status = "Khớp cao" # Dòng Rank 1 luôn là Khớp cao (nếu chưa đạt 100%)
-                        elif current_score >= 70:
-                            status = "Trung bình"
-                        elif current_score >= 50:
-                            status = "Thấp"
-                        else:
-                            status = "Rất thấp"
-                        # --------------------------------------
-
                         all_results.append({
-                            'Input_Goc': inp,
-                            'Rank': rank,
-                            'Trang_Thai': status, # <--- Cột mới thêm vào đây
-                            'Ma_VTMA': m['Mã VTMA'],
-                            'Ten_VTMA': m['Tên Thuốc (SKU)'],
-                            'NSX_Chuan': m['NSX'],
-                            'Ham_Luong_Chuan': m['Hàm Lượng'],
-                            'Diem_Tong': m['Điểm Tổng'],
-                            'Diem_Ten': m['Điểm Tên (40%)'],
-                            'Diem_Hang': m['Điểm Hãng (20%)'],
-                            'Diem_HoatChat': m['Điểm HoạtChất (20%)'],
-                            'Diem_HamLuong': m['Điểm HàmLượng (10%)'],
-                            'Diem_Dang': m['Điểm Dạng (10%)'],
-                            'AI_Bonus': m['AI Bonus']
+                            'Input_Goc': inp, 'Rank': rank, 'Trang_Thai': status,
+                            'Ma_VTMA': m['Mã VTMA'], 'Ten_VTMA': m['Tên Thuốc (SKU)'],
+                            'NSX_Chuan': m['NSX'], 'Ham_Luong_Chuan': m['Hàm Lượng'],
+                            'Diem_Tong': m['Điểm Tổng'], 'AI_Suggestion': '' # Cột chờ AI
                         })
                 else:
                     all_results.append({
-                        'Input_Goc': inp, 'Rank': '-', 
-                        'Trang_Thai': 'Không tìm thấy', # <--- Cột mới cho trường hợp rỗng
-                        'Ma_VTMA': '', 'Ten_VTMA': '', 
-                        'NSX_Chuan': '', 'Ham_Luong_Chuan': '',
-                        'Diem_Tong': 0, 'Diem_Ten':0, 'Diem_Hang':0, 'Diem_HoatChat':0,
-                        'Diem_HamLuong':0, 'Diem_Dang':0, 'AI_Bonus':0
+                        'Input_Goc': inp, 'Rank': 1, 'Trang_Thai': 'Không tìm thấy',
+                        'Ma_VTMA': '', 'Ten_VTMA': '', 'NSX_Chuan': '', 'Ham_Luong_Chuan': '',
+                        'Diem_Tong': 0, 'AI_Suggestion': ''
                     })
                 bar.progress((i+1)/len(df_in))
-                
-            df_out = pd.DataFrame(all_results)
-            st.success("✅ Hoàn tất!")
             
-            # Hiển thị DataFrame
-            st.dataframe(df_out, use_container_width=True)
+            st.session_state.result_df = pd.DataFrame(all_results)
+            st.success("✅ Đã chạy xong Fuzzy Match cơ bản!")
+
+        # --- KHU VỰC HIỂN THỊ KẾT QUẢ & NÚT AI ---
+        if 'result_df' in st.session_state:
+            st.divider()
+            st.subheader("🛠️ CÔNG CỤ AI NÂNG CAO (GEMINI PRO)")
             
-            # Tô màu trạng thái trong Excel để dễ nhìn
-            # (Logic: Khớp 100% -> Xanh đậm, Khớp cao -> Xanh nhạt, Thấp -> Đỏ)
-            excel_name = "ket_qua_map_final.xlsx"
-            df_out.to_excel(excel_name, index=False)
+            col_ai_1, col_ai_2 = st.columns(2)
             
-            col1, col2 = st.columns(2)
-            with col1:
-                with open(excel_name, "rb") as f:
-                    st.download_button("📥 Tải Excel", f, excel_name)
-            with col2:
-                csv = df_out.to_csv(index=False, encoding='utf-8-sig')
-                st.download_button("📥 Tải CSV", csv, "ket_qua_map_final.csv", "text/csv")
-           
+            # OPTION 1: AI RÀ SOÁT
+            with col_ai_1:
+                st.write("**Option 1: AI Rà Soát Nghi Ngờ**")
+                st.caption("AI sẽ kiểm tra các dòng Rank 1. Nếu thấy sai, nó sẽ đề xuất lại.")
+                if st.button("🕵️ Kích hoạt AI Rà Soát"):
+                    if not st.session_state.gemini.is_ready:
+                        st.error("Vui lòng nhập API Key trước!")
+                    else:
+                        df_res = st.session_state.result_df
+                        # Chỉ check dòng Rank 1 để tiết kiệm
+                        target_rows = df_res[df_res['Rank'] == 1]
+                        
+                        my_bar = st.progress(0)
+                        count = 0
+                        
+                        for idx, row in target_rows.iterrows():
+                            # Logic: Chỉ check nếu Điểm < 90 (Nghi ngờ)
+                            if row['Diem_Tong'] < 90:
+                                # Lấy lại danh sách ứng viên từ Data gốc
+                                candidates = get_candidates(row['Input_Goc'], st.session_state.db_vtma, limit=15)
+                                # Hỏi Gemini
+                                ai_response = st.session_state.gemini.smart_match(row['Input_Goc'], candidates)
+                                
+                                # Cập nhật vào DataFrame
+                                st.session_state.result_df.at[idx, 'AI_Suggestion'] = f"🤖 {ai_response}"
+                            
+                            count += 1
+                            my_bar.progress(count / len(target_rows))
+                            
+                        st.success("Đã rà soát xong!")
+            
+            # OPTION 2: AI DEEP SEARCH (CHO CA KHÓ)
+            with col_ai_2:
+                st.write("**Option 2: Deep Search (Ca khó)**")
+                st.caption(f"Chỉ tìm những dòng 'Không tìm thấy' hoặc Điểm < {threshold_ai}")
+                if st.button("🔍 Kích hoạt Deep Search"):
+                    if not st.session_state.gemini.is_ready:
+                        st.error("Vui lòng nhập API Key trước!")
+                    else:
+                        df_res = st.session_state.result_df
+                        # Lọc các ca khó
+                        mask = (df_res['Diem_Tong'] < threshold_ai) | (df_res['Trang_Thai'] == 'Không tìm thấy')
+                        hard_cases = df_res[mask]
+                        
+                        if hard_cases.empty:
+                            st.info("Không có ca nào dưới ngưỡng điểm này.")
+                        else:
+                            my_bar = st.progress(0)
+                            count = 0
+                            for idx, row in hard_cases.iterrows():
+                                # Lấy 30 ứng viên (nới rộng phạm vi)
+                                candidates = get_candidates(row['Input_Goc'], st.session_state.db_vtma, limit=30)
+                                ai_response = st.session_state.gemini.smart_match(row['Input_Goc'], candidates)
+                                st.session_state.result_df.at[idx, 'AI_Suggestion'] = f"🔍 {ai_response}"
+                                
+                                count += 1
+                                my_bar.progress(count / len(hard_cases))
+                            st.success(f"Đã xử lý {len(hard_cases)} ca khó!")
+
+            # HIỂN THỊ KẾT QUẢ CUỐI CÙNG
+            st.dataframe(st.session_state.result_df)
+            
+            # Download
+            df_final = st.session_state.result_df
+            excel_name = "ket_qua_map_AI.xlsx"
+            df_final.to_excel(excel_name, index=False)
+            with open(excel_name, "rb") as f:
+                st.download_button("📥 Tải Excel (Kèm đề xuất AI)", f, excel_name)
 
 with tab2:
     st.write("Phần Training AI (Giữ nguyên)...")
