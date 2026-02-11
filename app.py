@@ -346,31 +346,69 @@ tab1, tab_brand, tab3, tab4 = st.tabs(["1️⃣ Upload & Test", "2️⃣ Chọn 
 
 # --- TAB 1: UPLOAD & TEST SAMPLE (TỪ FILE 01) ---
 with tab1:
-    st.subheader("Bước 1: Tải dữ liệu & Phân tích mẫu")
-    uploaded = st.file_uploader("Upload file Excel/CSV cần map", type=['xlsx', 'csv'])
+    # --- TAB 1: UPLOAD HOẶC DÁN CLIPBOARD ---
+with tab1:
+    st.subheader("Bước 1: Nhập dữ liệu (Upload hoặc Dán)")
     
-    if uploaded:
-        if uploaded.name.endswith('.csv'): df_in = pd.read_csv(uploaded)
-        else: df_in = pd.read_excel(uploaded)
-        
-        st.session_state.df_input = df_in # Lưu vào session để dùng cho Tab 3
-        st.write(f"Đã nhận {len(df_in)} dòng dữ liệu.")
-        col_target = st.selectbox("Chọn cột Tên thuốc:", df_in.columns, key="col_target")
-        st.session_state.col_target = col_target
+    # CÁCH 1: UPLOAD FILE
+    uploaded = st.file_uploader("📁 Cách 1: Upload file Excel/CSV", type=['xlsx', 'csv'])
+    
+    # CÁCH 2: DÁN TỪ EXCEL
+    st.write("--- HOẶC ---")
+    paste_text = st.text_area("📋 Cách 2: Copy từ Excel và Dán vào đây (Ctrl+V)", height=150, 
+                              placeholder="Mở file Excel -> Bôi đen vùng dữ liệu -> Ctrl+C -> Bấm vào đây và Ctrl+V")
 
+    df_in = None
+
+    # XỬ LÝ DỮ LIỆU ĐẦU VÀO
+    if uploaded:
+        try:
+            if uploaded.name.endswith('.csv'): df_in = pd.read_csv(uploaded)
+            else: df_in = pd.read_excel(uploaded)
+            st.success(f"✅ Đã tải file: {uploaded.name}")
+        except Exception as e:
+            st.error(f"Lỗi đọc file: {e}")
+
+    elif paste_text:
+        try:
+            # Excel copy thường là dạng TSV (Tab Separated Values)
+            df_in = pd.read_csv(io.StringIO(paste_text), sep='\t')
+            st.success("✅ Đã đọc dữ liệu từ Clipboard!")
+        except:
+            st.error("❌ Dữ liệu dán không đúng định dạng bảng Excel.")
+
+    # NẾU CÓ DỮ LIỆU (TỪ FILE HOẶC PASTE)
+    if df_in is not None and not df_in.empty:
+        # Lưu vào Session State để Tab 3 dùng
+        st.session_state.df_input = df_in 
+        st.write(f"📊 Tổng số dòng: {len(df_in)}")
+        st.dataframe(df_in.head(3)) # Show 3 dòng đầu check
+        
+        # Chọn cột (Code đã fix lỗi Session State)
+        # Chỉ dùng key, không gán thủ công st.session_state.col_target = ...
+        col_target_box = st.selectbox("Chọn cột Tên thuốc:", df_in.columns, key="col_target_key")
+        
+        # Lưu giá trị cột đã chọn vào biến riêng để dùng (nếu cần)
+        st.session_state.col_target = col_target_box
+
+        # Nút bấm chạy thử
         if st.button("🧪 CHẠY THỬ 3 MẪU & GỢI Ý NSX"):
             sample_3 = df_in.head(3)
             temp_results = []
-            for i, row in sample_3.iterrows():
-                inp = str(row[col_target])
-                # Chạy không lọc để tìm NSX tiềm năng
-                matches = search_product_v3(inp, st.session_state.db_vtma, st.session_state.brain, 30, 1)
-                if matches:
-                    temp_results.append({'Input': inp, 'NSX_Gợi_Ý': matches[0]['NSX'], 'Mã': matches[0]['Mã VTMA']})
+            
+            # Progress bar giả lập cho đẹp
+            with st.spinner("Đang phân tích mẫu..."):
+                for i, row in sample_3.iterrows():
+                    inp = str(row[col_target_box]) 
+                    matches = search_product_v3(inp, st.session_state.db_vtma, st.session_state.brain, 30, 1)
+                    if matches:
+                        temp_results.append({'Input': inp, 'NSX_Gợi_Ý': matches[0]['NSX'], 'Mã': matches[0]['Mã VTMA']})
             
             st.session_state.brand_suggestions = temp_results
-            st.success("✅ Đã xong! Hãy chuyển sang Tab 'Chọn Bộ Lọc' để xác nhận các NSX này.")
+            st.success("✅ Đã xong! Hãy chuyển sang Tab 2 để xác nhận bộ lọc.")
             st.table(temp_results)
+    else:
+        st.info("👈 Vui lòng Upload file hoặc Dán dữ liệu để bắt đầu.")
 
 # --- TAB 2: BRAND FILTER (TỪ FILE 01 - TÍNH NĂNG "SÁT THỦ") ---
 with tab_brand:
