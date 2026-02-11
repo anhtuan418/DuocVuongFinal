@@ -345,8 +345,7 @@ st.title("🧬 PharmaMaster Ultimate: Intelligent Mapping")
 tab1, tab_brand, tab3, tab4 = st.tabs(["1️⃣ Upload & Test", "2️⃣ Chọn Bộ Lọc (NSX)", "3️⃣ Chạy Full & Fix Lỗi", "4️⃣ Training Model"])
 
 # --- TAB 1: UPLOAD & TEST SAMPLE (TỪ FILE 01) ---
-with tab1:
-    # --- TAB 1: UPLOAD HOẶC DÁN CLIPBOARD ---
+
 with tab1:
     st.subheader("Bước 1: Nhập dữ liệu (Upload hoặc Dán)")
     
