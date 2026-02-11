@@ -9,14 +9,15 @@ from collections import Counter
 import google.generativeai as genai
 import time
 import random
+import io
 
 # =============================================================================
-# 1. CẤU HÌNH TRANG
+# 1. CẤU HÌNH TRANG & CSS
 # =============================================================================
-st.set_page_config(page_title="PharmaMaster AI", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="PharmaMaster Ultimate", layout="wide", page_icon="🧬")
 
 # =============================================================================
-# 2. CLASS GEMINI AI (CÓ CHẾ ĐỘ CHỜ & THỬ LẠI)
+# 2. CLASS GEMINI AI (VỚI CƠ CHẾ RETRY MẠNH MẼ TỪ FILE 02)
 # =============================================================================
 class GeminiAgent:
     def __init__(self, api_key, model_name):
@@ -43,7 +44,7 @@ class GeminiAgent:
 
         candidates_str = ""
         for idx, row in candidates_df.iterrows():
-            candidates_str += f"- ID: {row['ma_vtma']} | Tên: {row['ten_thuoc']} | HL: {row['ham_luong']} | NSX: {row['ten_cong_ty']}\n"
+            candidates_str += f"- ID: {row['ma_vtma']} | Tên: {row['ten_thuoc']} | HL: {row['ham_luong']} | NSX: {row['nsx_full']}\n"
 
         prompt = f"""
         Bạn là Dược sĩ. Tìm mã thuốc chuẩn (ID) cho sản phẩm đầu vào.
@@ -51,12 +52,11 @@ class GeminiAgent:
         DATABASE:
         {candidates_str}
         YÊU CẦU: Chọn 1 ID khớp nhất.
-        TRẢ LỜI 1 DÒNG: ID_CHON | ĐỘ_TIN_CẬY | LÝ DO
+        TRẢ LỜI 1 DÒNG DUY NHẤT: ID_CHON | ĐỘ_TIN_CẬY (Thấp/Trung bình/Cao) | LÝ DO NGẮN GỌN
         Ví dụ: VTMA_001 | Cao | Khớp tên và hãng
         Nếu không khớp >70%, trả về: "NONE | - | Không tìm thấy"
         """
         
-        # --- CƠ CHẾ THỬ LẠI THÔNG MINH (RETRY LOGIC) ---
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -64,18 +64,17 @@ class GeminiAgent:
                 return response.text.strip()
             except Exception as e:
                 error_str = str(e)
-                # Nếu gặp lỗi 429 (Quota) hoặc quá tải
                 if "429" in error_str or "quota" in error_str.lower():
-                    wait_time = (attempt + 1) * 5 + random.uniform(0, 2) # Chờ 5s, 10s, 15s...
-                    time.sleep(wait_time) # Nghỉ ngơi
-                    continue # Thử lại
+                    wait_time = (attempt + 1) * 3 + random.uniform(0, 2)
+                    time.sleep(wait_time)
+                    continue
                 else:
                     return f"AI Error: {error_str}"
         
         return "⚠️ AI Busy (Hết hạn mức, vui lòng chờ 1 phút)"
 
 # =============================================================================
-# 3. CLASS MACHINE LEARNING (PHARMA BRAIN)
+# 3. CLASS MACHINE LEARNING (PHARMA BRAIN - GIỮ NGUYÊN)
 # =============================================================================
 class PharmaBrain:
     def __init__(self):
@@ -132,7 +131,7 @@ class PharmaBrain:
         return False
 
 # =============================================================================
-# 4. XỬ LÝ DỮ LIỆU & LOAD FILE
+# 4. XỬ LÝ DỮ LIỆU TỐI ƯU (MERGE LOGIC)
 # =============================================================================
 def normalize_text(text):
     if pd.isna(text): return ""
@@ -154,21 +153,22 @@ def load_master_data():
     try:
         df = pd.read_csv(file_path, sep=None, engine='python', encoding='utf-8-sig')
     except:
-        try:
-            df = pd.read_csv(file_path, sep=None, engine='python', encoding='latin1')
+        try: df = pd.read_csv(file_path, sep=None, engine='python', encoding='latin1')
         except Exception as e:
             st.error(f"❌ Lỗi đọc file: {e}")
             return None
 
     df.columns = df.columns.str.strip().str.lower().str.replace('\ufeff', '').str.replace('ï»¿', '')
     
+    # 1. Mapping cột thông minh (Từ File 01)
     mapping_dict = {
         'ma_vtma': ['ma_thuoc', 'vtma code', 'code'],
         'ten_thuoc': ['ten_thuoc', 'product', 'name'],
         'hoat_chat': ['hoat_chat', 'molecule'],
         'ten_cong_ty': ['ten_cong_ty', 'manufacturer', 'ten_tap_doan'],
+        'corporation': ['corporation', 'tap_doan'],
         'ham_luong': ['ham_luong', 'galenic', 'nong do'],
-        'dang_bao_che': ['dang_bao_che', 'unit_measure', 'dang_dung'],
+        'dang_bao_che': ['dang_bao_che', 'unit_measure'],
         'sku_full': ['ten_day_du', 'sku', 'product_name'] 
     }
 
@@ -187,8 +187,16 @@ def load_master_data():
         if col not in df.columns: df[col] = "" 
         df[col] = df[col].astype(str).replace('nan', '')
 
+    # 2. Xử lý gộp cột NSX (Từ File 01 - Quan trọng cho lọc)
+    if 'corporation' in df.columns:
+        df['nsx_full'] = df['ten_cong_ty'] + " (" + df['corporation'].fillna('') + ")"
+    else:
+        df['nsx_full'] = df['ten_cong_ty']
+    df['nsx_full'] = df['nsx_full'].str.replace(r'\(\s*\)', '', regex=True).str.strip()
+
+    # 3. Tính toán trước các cột chuẩn hóa (Từ File 02 - Tối ưu tốc độ)
     df['norm_name'] = df['ten_thuoc'].apply(normalize_text)
-    df['norm_brand'] = df['ten_cong_ty'].apply(normalize_text)
+    df['norm_brand'] = df['ten_cong_ty'].apply(normalize_text) # Vẫn giữ norm_brand gốc để so sánh tên
     df['norm_active'] = df['hoat_chat'].apply(normalize_text)
     df['norm_strength'] = df['ham_luong'].apply(normalize_text)
     df['norm_form'] = df['dang_bao_che'].apply(normalize_text)
@@ -203,10 +211,12 @@ def load_master_data():
     return df
 
 # =============================================================================
-# 5. CORE ENGINE (FUZZY LOGIC)
+# 5. CORE ENGINE (KẾT HỢP LOGIC)
 # =============================================================================
 def calculate_detailed_score(input_str, row_data, ml_predicted_brand=None):
     norm_input = normalize_text(input_str)
+    
+    # Dùng cột đã chuẩn hóa sẵn (tối ưu từ File 02)
     score_name = fuzz.token_set_ratio(norm_input, row_data['norm_name'])
     score_brand = fuzz.partial_ratio(row_data['norm_brand'], norm_input)
     
@@ -214,6 +224,7 @@ def calculate_detailed_score(input_str, row_data, ml_predicted_brand=None):
     if row_data['norm_active']: score_active = fuzz.token_set_ratio(row_data['norm_active'], norm_input)
     else: score_active = 50 
 
+    # Logic số học (Từ cả 2 file)
     input_nums = extract_numbers(input_str)
     row_nums = extract_numbers(row_data['ham_luong'])
     score_strength = 0
@@ -239,19 +250,27 @@ def calculate_detailed_score(input_str, row_data, ml_predicted_brand=None):
         's_strength': score_strength, 's_form': score_form, 'ml_bonus': ml_bonus
     }
 
-def get_candidates(input_text, db_df, limit=20):
-    if 'search_index' not in db_df.columns:
-        db_df['search_index'] = db_df.apply(lambda x: f"{x['norm_name']} {x['norm_active']} {x['norm_strength']}", axis=1)
+def get_candidates(input_text, db_df, limit=20, filtered_nsx=None):
+    # Logic lọc NSX (Từ File 01)
+    working_df = db_df
+    if filtered_nsx:
+        # Lọc dataframe trước khi fuzzy search -> Tăng tốc & Chính xác cực cao
+        working_df = db_df[db_df['nsx_full'].isin(filtered_nsx)]
     
-    norm_input = normalize_text(input_text)
-    candidates = process.extract(norm_input, db_df['search_index'], limit=limit, scorer=fuzz.token_set_ratio)
-    indices = [x[2] for x in candidates]
-    return db_df.iloc[indices].copy()
+    if working_df.empty: return pd.DataFrame()
 
-def search_product_v3(input_text, db_df, brain_model, min_score=50, top_n=3):
+    norm_input = normalize_text(input_text)
+    # Search trên tập đã lọc
+    candidates = process.extract(norm_input, working_df['search_index'], limit=limit, scorer=fuzz.token_set_ratio)
+    indices = [x[2] for x in candidates]
+    return working_df.iloc[indices].copy()
+
+def search_product_v3(input_text, db_df, brain_model, min_score=50, top_n=3, filtered_nsx=None):
     predicted_brand = brain_model.predict_brand(input_text)
-    subset = get_candidates(input_text, db_df, limit=50)
+    subset = get_candidates(input_text, db_df, limit=50, filtered_nsx=filtered_nsx)
     
+    if subset.empty: return []
+
     results = []
     for idx, row in subset.iterrows():
         scores = calculate_detailed_score(input_text, row, ml_predicted_brand=predicted_brand)
@@ -259,14 +278,13 @@ def search_product_v3(input_text, db_df, brain_model, min_score=50, top_n=3):
             results.append({
                 'Mã VTMA': row['ma_vtma'],
                 'Tên Thuốc (SKU)': row['display_name'],
-                'NSX': row['ten_cong_ty'],
+                'NSX': row['nsx_full'],
                 'Hàm Lượng': row['ham_luong'], 
                 'Điểm Tổng': round(scores['total'], 1),
                 'Điểm Tên (40%)': int(scores['s_name']),
                 'Điểm Hãng (20%)': int(scores['s_brand']),
                 'Điểm HoạtChất (20%)': int(scores['s_active']),
                 'Điểm HàmLượng (10%)': int(scores['s_strength']),
-                'Điểm Dạng (10%)': int(scores['s_form']),
                 'AI Bonus': scores['ml_bonus']
             })
             
@@ -274,7 +292,7 @@ def search_product_v3(input_text, db_df, brain_model, min_score=50, top_n=3):
     return results[:top_n]
 
 # =============================================================================
-# 6. GIAO DIỆN STREAMLIT
+# 6. GIAO DIỆN STREAMLIT (MERGE WORKFLOW)
 # =============================================================================
 
 if 'brain' not in st.session_state:
@@ -287,11 +305,15 @@ if 'db_vtma' not in st.session_state:
         if df_loaded is not None: st.session_state.db_vtma = df_loaded
         else: st.stop()
 
-# --- SIDEBAR: CẤU HÌNH API ĐỘNG ---
+# Khởi tạo session
+if 'confirmed_nsx' not in st.session_state: st.session_state.confirmed_nsx = []
+if 'brand_step_skipped' not in st.session_state: st.session_state.brand_step_skipped = False
+if 'brand_suggestions' not in st.session_state: st.session_state.brand_suggestions = []
+
+# --- SIDEBAR TỪ FILE 02 (CLEANER) ---
 with st.sidebar:
     st.header("🤖 Cấu hình Gemini AI")
     api_key = st.text_input("Nhập Google API Key", type="password")
-    
     valid_models = []
     if api_key:
         try:
@@ -300,173 +322,233 @@ with st.sidebar:
             for m in all_models:
                 if 'generateContent' in m.supported_generation_methods:
                      valid_models.append(m.name.replace("models/", ""))
-        except:
-            st.error("API Key lỗi hoặc không kết nối được!")
+        except: st.error("API Key lỗi!")
 
     if valid_models:
-        # Cố gắng chọn flash làm mặc định (an toàn nhất cho Free Tier)
-        default_ix = 0
-        if 'gemini-1.5-flash' in valid_models:
-            default_ix = valid_models.index('gemini-1.5-flash')
-        elif 'gemini-1.5-pro-latest' in valid_models:
-             # Nếu có bản pro latest thì dùng
-            default_ix = valid_models.index('gemini-1.5-pro-latest')
-
+        default_ix = valid_models.index('gemini-1.5-flash') if 'gemini-1.5-flash' in valid_models else 0
         selected_model = st.selectbox("Chọn Model AI:", valid_models, index=default_ix)
-        
-        # Cảnh báo nếu chọn model 2.5 (thường bị lỗi 0 quota)
-        if "2.5" in selected_model:
-            st.warning("⚠️ Model 2.5 thường bị giới hạn Quota. Hãy dùng 'gemini-1.5-flash' nếu gặp lỗi.")
-
         st.session_state.gemini = GeminiAgent(api_key, selected_model)
-        st.success(f"✅ Đã kết nối: {selected_model}")
+        st.success("✅ AI Sẵn sàng")
     else:
-        st.info("ℹ️ Nhập API Key để hiện danh sách Model.")
+        st.info("Nhập API Key để dùng tính năng AI sửa lỗi.")
         st.session_state.gemini = GeminiAgent(None, None)
 
     st.divider()
     st.header("⚙️ Cấu hình Map")
     min_score = st.slider("Min Score (%)", 0, 100, 60) 
     top_n = st.number_input("Top N", 1, 10, 3)
-    
-    st.subheader("⚙️ Cấu hình AI Rà Soát")
-    threshold_ai = st.number_input("Ngưỡng kích hoạt AI (xx)", 0, 100, 70)
+    threshold_ai = st.number_input("Ngưỡng kích hoạt Deep Search", 0, 100, 70)
 
-st.title("🧬 PharmaMaster: AI-Powered Mapping")
+st.title("🧬 PharmaMaster Ultimate: Intelligent Mapping")
 
-tab1, tab2 = st.tabs(["🚀 Mapping & Gemini", "🧠 Training Model"])
+# --- TAB WORKFLOW: KẾT HỢP 3 BƯỚC ---
+tab1, tab_brand, tab3, tab4 = st.tabs(["1️⃣ Upload & Test", "2️⃣ Chọn Bộ Lọc (NSX)", "3️⃣ Chạy Full & Fix Lỗi", "4️⃣ Training Model"])
 
+# --- TAB 1: UPLOAD & TEST SAMPLE (TỪ FILE 01) ---
 with tab1:
-    st.subheader("Mapping Dữ Liệu")
-    uploaded = st.file_uploader("Upload file Excel", type=['xlsx', 'csv'])
+    st.subheader("Bước 1: Tải dữ liệu & Phân tích mẫu")
+    uploaded = st.file_uploader("Upload file Excel/CSV cần map", type=['xlsx', 'csv'])
     
     if uploaded:
         if uploaded.name.endswith('.csv'): df_in = pd.read_csv(uploaded)
         else: df_in = pd.read_excel(uploaded)
         
-        st.write(f"Đã nhận {len(df_in)} dòng.")
-        col_target = st.selectbox("Chọn cột Tên thuốc:", df_in.columns)
-        
-        if st.button("🚀 BƯỚC 1: CHẠY MAPPING CƠ BẢN"):
+        st.session_state.df_input = df_in # Lưu vào session để dùng cho Tab 3
+        st.write(f"Đã nhận {len(df_in)} dòng dữ liệu.")
+        col_target = st.selectbox("Chọn cột Tên thuốc:", df_in.columns, key="col_target")
+        st.session_state.col_target = col_target
+
+        if st.button("🧪 CHẠY THỬ 3 MẪU & GỢI Ý NSX"):
+            sample_3 = df_in.head(3)
+            temp_results = []
+            for i, row in sample_3.iterrows():
+                inp = str(row[col_target])
+                # Chạy không lọc để tìm NSX tiềm năng
+                matches = search_product_v3(inp, st.session_state.db_vtma, st.session_state.brain, 30, 1)
+                if matches:
+                    temp_results.append({'Input': inp, 'NSX_Gợi_Ý': matches[0]['NSX'], 'Mã': matches[0]['Mã VTMA']})
+            
+            st.session_state.brand_suggestions = temp_results
+            st.success("✅ Đã xong! Hãy chuyển sang Tab 'Chọn Bộ Lọc' để xác nhận các NSX này.")
+            st.table(temp_results)
+
+# --- TAB 2: BRAND FILTER (TỪ FILE 01 - TÍNH NĂNG "SÁT THỦ") ---
+with tab_brand:
+    st.subheader("Bước 2: Xác nhận Nhà Sản Xuất (Bộ lọc)")
+    st.info("💡 Việc lọc đúng NSX sẽ giúp loại bỏ 90% kết quả sai và tăng tốc độ xử lý.")
+
+    # 1. Hiển thị gợi ý từ bước 1
+    if st.session_state.brand_suggestions:
+        suggestions = list(set([item['NSX_Gợi_Ý'] for item in st.session_state.brand_suggestions]))
+        st.write("Gợi ý từ dữ liệu mẫu:")
+        for nsx in suggestions:
+            c1, c2 = st.columns([4, 1])
+            c1.info(f"🏭 {nsx}")
+            if c2.button("Thêm", key=f"add_{nsx}"):
+                if nsx not in st.session_state.confirmed_nsx:
+                    st.session_state.confirmed_nsx.append(nsx)
+                    st.rerun()
+
+    st.divider()
+    
+    # 2. Chọn thủ công
+    all_vtma_nsx = sorted(st.session_state.db_vtma['nsx_full'].unique().tolist())
+    selected_manual = st.selectbox("Tìm & Thêm thủ công:", ["--- Chọn nhà máy ---"] + all_vtma_nsx)
+    if st.button("➕ Thêm vào danh sách"):
+        if selected_manual != "--- Chọn nhà máy ---" and selected_manual not in st.session_state.confirmed_nsx:
+            st.session_state.confirmed_nsx.append(selected_manual)
+            st.rerun()
+
+    # 3. Danh sách đã chọn
+    st.write("### 📋 Danh sách áp dụng:")
+    if st.session_state.confirmed_nsx:
+        for nsx in st.session_state.confirmed_nsx:
+            st.success(f"✅ {nsx}")
+        if st.button("🗑️ Xóa tất cả bộ lọc"):
+            st.session_state.confirmed_nsx = []
+            st.session_state.brand_step_skipped = False
+            st.rerun()
+    else:
+        st.warning("Chưa có bộ lọc nào.")
+
+    if st.checkbox("⏩ Bỏ qua bước này (Tìm trên toàn bộ Database)", value=st.session_state.brand_step_skipped):
+        st.session_state.brand_step_skipped = True
+    else:
+        st.session_state.brand_step_skipped = False
+
+# --- TAB 3: FULL RUN & AI FIX (KẾT HỢP FILE 01 & 02) ---
+with tab3:
+    st.subheader("Bước 3: Chạy Mapping & AI Hậu Kiểm")
+    
+    if 'df_input' not in st.session_state:
+        st.error("Vui lòng upload file ở Tab 1 trước.")
+    else:
+        # Nút chạy chính
+        if st.button("🚀 CHẠY FULL MAPPING"):
+            filter_list = st.session_state.confirmed_nsx if not st.session_state.brand_step_skipped else None
+            
             all_results = []
             bar = st.progress(0)
-            
-            for i, row in df_in.iterrows():
-                inp = str(row[col_target])
-                matches = search_product_v3(inp, st.session_state.db_vtma, st.session_state.brain, min_score, top_n)
+            df_run = st.session_state.df_input
+            col_t = st.session_state.col_target
+
+            for i, row in df_run.iterrows():
+                inp = str(row[col_t])
+                # Gọi hàm search với filter_list
+                matches = search_product_v3(inp, st.session_state.db_vtma, st.session_state.brain, min_score, top_n, filtered_nsx=filter_list)
                 
                 if matches:
                     for rank, m in enumerate(matches, 1):
-                        current_score = m['Điểm Tổng']
-                        status = "Khớp 100%" if current_score == 100 else ("Khớp cao" if rank == 1 else ("Trung bình" if current_score >= 70 else "Thấp"))
-                        
                         all_results.append({
-                            'Input_Goc': inp, 'Rank': rank, 'Trang_Thai': status,
+                            'Input_Goc': inp, 'Rank': rank, 'Trang_Thai': 'Khớp',
                             'Ma_VTMA': m['Mã VTMA'], 'Ten_VTMA': m['Tên Thuốc (SKU)'],
-                            'NSX_Chuan': m['NSX'], 'Ham_Luong_Chuan': m['Hàm Lượng'],
+                            'NSX_Chuan': m['NSX'],'Ham_Luong_Chuan': m['Hàm Lượng'],
                             'Diem_Tong': m['Điểm Tổng'], 'AI_Suggestion': '' 
                         })
                 else:
+                    # Trường hợp không tìm thấy (Not Found)
                     all_results.append({
                         'Input_Goc': inp, 'Rank': 1, 'Trang_Thai': 'Không tìm thấy',
                         'Ma_VTMA': '', 'Ten_VTMA': '', 'NSX_Chuan': '', 'Ham_Luong_Chuan': '',
                         'Diem_Tong': 0, 'AI_Suggestion': ''
                     })
-                bar.progress((i+1)/len(df_in))
+                
+                # Cập nhật thanh tiến trình
+                bar.progress((i+1)/len(df_run))
             
+            # Lưu kết quả vào Session State
             st.session_state.result_df = pd.DataFrame(all_results)
             st.success("✅ Đã chạy xong Fuzzy Match cơ bản!")
 
-        if 'result_df' in st.session_state:
-            st.divider()
-            st.subheader("🛠️ CÔNG CỤ AI NÂNG CAO")
+    # --- KHU VỰC 2: AI DEEP SEARCH & DOWNLOAD (TỪ FILE 02) ---
+    if 'result_df' in st.session_state:
+        st.divider()
+        st.subheader("🛠️ Công cụ: AI Rà Soát & Deep Search")
+        
+        col_ai_1, col_ai_2 = st.columns([2, 1])
+        
+        with col_ai_1:
+            st.info(f"AI sẽ tự động kiểm tra các dòng có Điểm < {threshold_ai} hoặc 'Không tìm thấy'.")
             
-            col_ai_1, col_ai_2 = st.columns(2)
-            
-            with col_ai_1:
-                st.write("**Option 1: AI Rà Soát**")
-                st.caption("AI kiểm tra các dòng Rank 1 nghi ngờ")
-                if st.button("🕵️ Kích hoạt AI Rà Soát"):
-                    if not st.session_state.gemini.is_ready:
-                        st.error("Thiếu API Key!")
+            if st.button("🕵️ Kích hoạt AI Rà Soát (Deep Search)"):
+                if not st.session_state.gemini.is_ready:
+                    st.error("❌ Thiếu API Key! Vui lòng nhập Key ở cột bên trái.")
+                else:
+                    df_res = st.session_state.result_df
+                    # Lọc ra các ca khó cần AI xử lý
+                    mask = (df_res['Diem_Tong'] < threshold_ai) | (df_res['Trang_Thai'] == 'Không tìm thấy')
+                    # Chỉ lấy Rank 1 để check (tránh check trùng lặp các rank sau)
+                    hard_cases = df_res[mask & (df_res['Rank'] == 1)]
+                    
+                    if hard_cases.empty:
+                        st.success("🎉 Dữ liệu quá tốt! Không có dòng nào dưới ngưỡng điểm cần AI sửa.")
                     else:
-                        df_res = st.session_state.result_df
-                        target_rows = df_res[df_res['Rank'] == 1]
-                        
+                        st.write(f"Đang xử lý {len(hard_cases)} trường hợp nghi ngờ...")
                         my_bar = st.progress(0)
                         count = 0
                         
-                        for idx, row in target_rows.iterrows():
-                            # Chỉ check nếu Điểm < 90
-                            if row['Diem_Tong'] < 90:
-                                candidates = get_candidates(row['Input_Goc'], st.session_state.db_vtma, limit=15)
-                                ai_response = st.session_state.gemini.smart_match(row['Input_Goc'], candidates)
-                                st.session_state.result_df.at[idx, 'AI_Suggestion'] = f"🤖 {ai_response}"
-                                
-                                # --- THÊM DELAY ĐỂ TRÁNH LỖI 429 ---
-                                time.sleep(2) # Nghỉ 2 giây sau mỗi lần hỏi
+                        # Sử dụng filter hiện tại nếu có
+                        current_filter = st.session_state.confirmed_nsx if not st.session_state.brand_step_skipped else None
+
+                        for idx, row in hard_cases.iterrows():
+                            # Lấy candidates rộng hơn (limit=20) để AI có nhiều lựa chọn
+                            candidates = get_candidates(row['Input_Goc'], st.session_state.db_vtma, limit=20, filtered_nsx=current_filter)
+                            
+                            # Gọi Gemini Agent (đã có Retry logic)
+                            ai_response = st.session_state.gemini.smart_match(row['Input_Goc'], candidates)
+                            
+                            # Ghi kết quả vào cột AI Suggestion
+                            st.session_state.result_df.at[idx, 'AI_Suggestion'] = f"🤖 {ai_response}"
+                            
+                            # Delay nhẹ để tránh lỗi 429 nếu chạy quá nhanh
+                            time.sleep(1.5)
                             
                             count += 1
-                            my_bar.progress(count / len(target_rows))
-                            
-                        st.success("Đã rà soát xong!")
-                        st.session_state.result_df = st.session_state.result_df 
-
-            with col_ai_2:
-                st.write("**Option 2: Deep Search**")
-                st.caption(f"Tìm kỹ các dòng 'Không tìm thấy' hoặc Điểm < {threshold_ai}")
-                if st.button("🔍 Kích hoạt Deep Search"):
-                    if not st.session_state.gemini.is_ready:
-                        st.error("Thiếu API Key!")
-                    else:
-                        df_res = st.session_state.result_df
-                        mask = (df_res['Diem_Tong'] < threshold_ai) | (df_res['Trang_Thai'] == 'Không tìm thấy')
-                        hard_cases = df_res[mask]
+                            my_bar.progress(count / len(hard_cases))
                         
-                        if hard_cases.empty:
-                            st.info("Không có ca nào dưới ngưỡng này.")
-                        else:
-                            my_bar = st.progress(0)
-                            count = 0
-                            for idx, row in hard_cases.iterrows():
-                                candidates = get_candidates(row['Input_Goc'], st.session_state.db_vtma, limit=30)
-                                ai_response = st.session_state.gemini.smart_match(row['Input_Goc'], candidates)
-                                st.session_state.result_df.at[idx, 'AI_Suggestion'] = f"🔍 {ai_response}"
-                                
-                                # --- THÊM DELAY ĐỂ TRÁNH LỖI 429 ---
-                                time.sleep(2) # Nghỉ 2 giây sau mỗi lần hỏi
-                                
-                                count += 1
-                                my_bar.progress(count / len(hard_cases))
-                            st.success(f"Đã xử lý {len(hard_cases)} ca khó!")
-                            st.session_state.result_df = st.session_state.result_df 
+                        st.success(f"✅ Đã rà soát xong {len(hard_cases)} dòng!")
+                        st.rerun() # Load lại trang để hiển thị kết quả mới
 
-            st.dataframe(st.session_state.result_df)
+        with col_ai_2:
+            st.write("### 📥 Xuất Kết Quả")
+            # Hiển thị dataframe kết quả
+            st.dataframe(st.session_state.result_df, height=300)
             
-            df_final = st.session_state.result_df
-            excel_name = "ket_qua_map_AI.xlsx"
-            df_final.to_excel(excel_name, index=False)
-            with open(excel_name, "rb") as f:
-                st.download_button("📥 Tải Excel (Kèm đề xuất AI)", f, excel_name)
+            # Logic xuất Excel
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                st.session_state.result_df.to_excel(writer, index=False, sheet_name='KetQua')
+            
+            st.download_button(
+                label="Tải file Excel (.xlsx)",
+                data=buffer,
+                file_name="Pharma_Map_Result_AI.xlsx",
+                mime="application/vnd.ms-excel"
+            )
 
-with tab2:
-    st.subheader("2. Huấn luyện AI (Supervised Learning)")
-    st.info("Upload file lịch sử đã map đúng để máy học cách nhận diện Nhà Sản Xuất từ tên viết tắt.")
+# --- TAB 4: TRAINING MODEL (TỪ FILE 01 - GIÚP MÁY KHÔN HƠN) ---
+with tab4:
+    st.subheader("4️⃣ Huấn luyện AI (Supervised Learning)")
+    st.info("Nếu máy nhận diện sai hãng (ví dụ: 'DHG' không ra 'Dược Hậu Giang'), hãy upload file lịch sử đã map đúng để dạy lại máy.")
     
-    uploaded_hist = st.file_uploader("Chọn file lịch sử (.xlsx)", key="hist")
+    uploaded_hist = st.file_uploader("Chọn file lịch sử mapping (.xlsx)", key="hist")
     
     if uploaded_hist:
         df_hist = pd.read_excel(uploaded_hist)
+        st.write("Dữ liệu mẫu:")
         st.dataframe(df_hist.head(3))
         
         c1, c2 = st.columns(2)
-        col_in = c1.selectbox("Cột Tên Gốc (Input)", df_hist.columns)
-        col_out = c2.selectbox("Cột Hãng Chuẩn (Target)", df_hist.columns)
+        col_in = c1.selectbox("Cột Tên Gốc (Input) - Ví dụ: Ten_Thuoc", df_hist.columns)
+        col_out = c2.selectbox("Cột Hãng Chuẩn (Target) - Ví dụ: NSX_Chuan", df_hist.columns)
         
         if st.button("🎓 BẮT ĐẦU DẠY MÁY"):
-            with st.spinner("Đang phân tích dữ liệu..."):
+            with st.spinner("Đang phân tích quy luật từ ngữ..."):
+                # Gọi hàm learn từ Class PharmaBrain
                 n_learned = st.session_state.brain.learn(df_hist, col_in, col_out)
                 st.session_state.brain.save_model()
             
-            st.success(f"🎉 Đã học xong! Máy đã ghi nhớ {n_learned} quy luật nhận diện hãng mới.")
-            st.json(st.session_state.brain.brand_memory)
+            st.success(f"🎉 Đã học xong! Máy đã ghi nhớ thêm {n_learned} từ khóa nhận diện hãng mới.")
+            
+            with st.expander("Xem bộ nhớ (Brand Memory)"):
+                st.json(st.session_state.brain.brand_memory)
